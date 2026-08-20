@@ -42,6 +42,21 @@ class SpatialBlenderTests(unittest.TestCase):
         self.assertIn("spatial.managed", request["actions"][0]["source"])
         self.assertIn("EXTERNAL_MODIFICATION_CONFLICT", request["actions"][0]["source"])
 
+    def test_generated_update_orders_hierarchy_and_preserves_material_slots(self):
+        scene = spatial.Scene("hierarchy_regression")
+        frame = scene.frame("moving_frame", origin=(2, 0, 0))
+        child = scene.box("a_child", size=(3, 1, 1), frame=frame, center=(1.5, 0, 0))
+        scene.assembly("z_parent", frame=frame, children=(child,))
+        source = compile_script(build_compile_plan(scene.resolve(), mode="update")).source
+        ast.parse(source)
+        self.assertIn("ORDERED_ENTITY_IDS = _hierarchy_order()", source)
+        self.assertLess(
+            source.index("# Existing children may sort before a parent"),
+            source.index("for entity_id in ORDERED_ENTITY_IDS:\n    desired = DESIRED[entity_id]"),
+        )
+        self.assertIn("external_materials = list(old.materials)", source)
+        self.assertIn("mesh.materials.append(material)", source)
+
     def test_project_mode_enforces_off_opt_in_and_required(self):
         raw = {"actions": [{"action": "script.execute", "source": "import bpy"}]}
         spatial_request = {

@@ -195,7 +195,10 @@ def _replace_mesh(obj, desired):
     mesh = _explicit_mesh(params) if kind == "mesh" else _operator_mesh(kind, params)
     mesh.name = _name(desired["entityId"]) + "_Mesh"
     old = obj.data
+    external_materials = list(old.materials) if old is not None else []
     obj.data = mesh
+    for material in external_materials:
+        mesh.materials.append(material)
     if old is not None and old.users == 0:
         bpy.data.meshes.remove(old)
     for polygon in mesh.polygons:
@@ -261,7 +264,48 @@ for operation in PLAN["operations"]:
     if desired is not None:
         DESIRED[desired["entityId"]] = desired
 
-for entity_id in sorted(DESIRED):
+
+def _hierarchy_order():
+    result = []
+    visiting = set()
+    visited = set()
+
+    def visit(entity_id):
+        if entity_id in visited:
+            return
+        if entity_id in visiting:
+            raise RuntimeError("Cyclic resolved Spatial hierarchy at " + entity_id)
+        visiting.add(entity_id)
+        parent_id = DESIRED[entity_id].get("parent")
+        if parent_id:
+            if parent_id not in DESIRED:
+                raise RuntimeError("Missing resolved parent " + parent_id + " for " + entity_id)
+            visit(parent_id)
+        visiting.remove(entity_id)
+        visited.add(entity_id)
+        result.append(entity_id)
+
+    for candidate in sorted(DESIRED):
+        visit(candidate)
+    return result
+
+
+ORDERED_ENTITY_IDS = _hierarchy_order()
+
+# Existing children may sort before a parent whose world transform is changing.
+# Detach every managed desired entity while preserving its current world matrix so
+# applying the new parent transform cannot move a child a second time. Parenting is
+# restored only after every entity has its final resolved world transform.
+for entity_id in ORDERED_ENTITY_IDS:
+    obj = EXISTING.get(entity_id)
+    if obj is None or obj.parent is None:
+        continue
+    world = obj.matrix_world.copy()
+    obj.parent = None
+    obj.matrix_world = world
+
+
+for entity_id in ORDERED_ENTITY_IDS:
     desired = DESIRED[entity_id]
     obj = EXISTING.get(entity_id)
     if obj is None:
@@ -295,17 +339,12 @@ for entity_id in sorted(DESIRED):
     _stamp(obj, desired)
     RESULT["updated"].append(entity_id)
 
-for entity_id in sorted(DESIRED):
+for entity_id in ORDERED_ENTITY_IDS:
     desired = DESIRED[entity_id]
     parent_id = desired.get("parent")
-    if not parent_id:
-        continue
     obj = EXISTING[entity_id]
-    parent = EXISTING.get(parent_id)
-    if parent is None:
-        raise RuntimeError("Missing resolved parent " + parent_id + " for " + entity_id)
     world = obj.matrix_world.copy()
-    obj.parent = parent
+    obj.parent = EXISTING[parent_id] if parent_id else None
     obj.matrix_world = world
 
 if MODE == "update":
