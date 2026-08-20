@@ -166,6 +166,31 @@ print(resolved.why("collision_cell.center.x"))
 scene.write_yaml("analyser.spatial.yaml")
 ```
 
+Circular quality and surface shading are explicit authoring choices rather than
+hidden backend constants. Applicable primitives accept segment/ring counts, and
+all geometry accepts `flat`, `smooth`, or deterministic smooth-by-angle shading:
+
+```python
+base = scene.cylinder(
+    "base",
+    radius=140,
+    length=36,
+    segments=96,
+    shading=spatial.Shading.smooth_by_angle(30),
+)
+low_poly_knob = scene.cylinder(
+    "knob",
+    radius=12,
+    length=18,
+    segments=8,
+    shading="flat",
+)
+```
+
+The values are retained in normalized IR and object provenance, so a later edit
+can distinguish an intentional eight-sided control from a mechanical cylinder
+that must retain a round silhouette.
+
 Compile a serialized source through the live bridge only after opting in:
 
 ```powershell
@@ -262,3 +287,15 @@ The real Spatial compiler smoke is separate:
 It builds a semantic triple-quadrupole assembly, edits the chamber length,
 re-solves both declared gaps, preserves stable managed Blender object identity,
 and proves that an unrelated raw Blender object survives the update.
+
+Targeted real-Blender regressions also cover hierarchy/material update
+preservation, ordinary Bridge Spatial-ID export, and geometry quality/shading:
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
+  --background --factory-startup --python scripts\spatial_update_regression.py
+& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
+  --background --factory-startup --python scripts\spatial_state_identity_regression.py
+& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
+  --background --factory-startup --python scripts\spatial_geometry_quality_regression.py
+```

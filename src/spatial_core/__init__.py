@@ -28,6 +28,7 @@ from .model import (
     PrimitiveSpec,
     Relation,
     Scene,
+    Shading,
     SphereSpec,
 )
 from .plan import CompileOperation, CompilePlan, ExistingEntity, build_compile_plan
@@ -61,6 +62,7 @@ __all__ = [
     "ResolvedEntity",
     "ResolvedScene",
     "Scene",
+    "Shading",
     "SchemaError",
     "SpatialError",
     "SpatialMode",

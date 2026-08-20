@@ -27,6 +27,7 @@ from spatial_core import (
     ResolvedScene,
     Scene,
     SchemaError,
+    Shading,
     SpatialError,
     SpatialMode,
     SpatialModeError,

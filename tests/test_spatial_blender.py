@@ -58,6 +58,25 @@ class SpatialBlenderTests(unittest.TestCase):
         self.assertIn("external_materials = list(old.materials)", source)
         self.assertIn("mesh.materials.append(material)", source)
 
+    def test_generated_primitives_use_authored_quality_and_shading(self):
+        scene = spatial.Scene("quality")
+        scene.cylinder("mechanical", radius=1, length=2, segments=72, shading=spatial.Shading.smooth_by_angle(40))
+        scene.sphere("round", radius=1, segments=60, rings=30)
+        scene.torus("trim", major_radius=2, minor_radius=0.1, major_segments=80, minor_segments=18)
+        compiled = compile_script(build_compile_plan(scene.resolve(), mode="update"))
+        ast.parse(compiled.source)
+        desired = {
+            operation.entity_id: operation.desired["parametersMeters"]
+            for operation in compiled.plan.operations
+            if operation.desired is not None
+        }
+        self.assertEqual(desired["mechanical"]["segments"], 72)
+        self.assertEqual(desired["mechanical"]["shading"]["angleDegrees"], 40.0)
+        self.assertEqual(desired["round"]["rings"], 30)
+        self.assertEqual(desired["trim"]["minor_segments"], 18)
+        self.assertIn('vertices=params["segments"]', compiled.source)
+        self.assertIn("def _apply_shading(mesh, kind, params):", compiled.source)
+
     def test_state_export_prefers_canonical_spatial_identity_with_legacy_fallback(self):
         source = STATE_PATH.read_text(encoding="utf-8")
         self.assertIn('obj.get("spatial.entity_id") or obj.get("spatial_id")', source)

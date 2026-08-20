@@ -14,6 +14,7 @@ from spatial_core import (
     ExistingEntity,
     ExternalModificationConflictError,
     InvalidFrameGraphError,
+    InvalidParameterError,
     UnknownReferenceError,
     build_compile_plan,
 )
@@ -106,6 +107,28 @@ class SpatialCoreTests(unittest.TestCase):
         resolved = scene.resolve()
         self.assertEqual(resolved.entities["rack_tubes"].children, [f"rack_tubes[{index}]" for index in range(6)])
         self.assertEqual(resolved.inspect("pump")["anchors"]["outlet"]["position"], [12.0, 0.0, 3.0])
+
+    def test_geometry_quality_and_shading_are_explicit_and_round_trip(self):
+        scene = spatial.Scene("quality")
+        scene.cylinder("faceted", radius=1, length=2, segments=8, shading="flat")
+        scene.cylinder("mechanical", radius=1, length=2, segments=96, shading=spatial.Shading.smooth_by_angle(35))
+        scene.sphere("round", radius=1, segments=64, rings=32, shading="smooth")
+        scene.torus("trim", major_radius=2, minor_radius=0.1, major_segments=80, minor_segments=16)
+        encoded = scene.to_dict()
+        self.assertEqual(encoded["objects"]["faceted"]["segments"], 8)
+        self.assertEqual(encoded["objects"]["faceted"]["shading"], {"mode": "flat"})
+        self.assertEqual(encoded["objects"]["mechanical"]["segments"], 96)
+        self.assertEqual(
+            encoded["objects"]["mechanical"]["shading"],
+            {"mode": "smooth_by_angle", "angleDegrees": 35.0},
+        )
+        self.assertEqual(encoded["objects"]["round"]["rings"], 32)
+        self.assertEqual(encoded["objects"]["trim"]["major_segments"], 80)
+        self.assertEqual(spatial.Scene.from_dict(encoded).canonical_json(), scene.canonical_json())
+        with self.assertRaises(InvalidParameterError):
+            scene.cylinder("bad_segments", radius=1, length=1, segments=2)
+        with self.assertRaises(InvalidParameterError):
+            spatial.Shading.smooth_by_angle(180)
 
     def test_conflicting_authored_and_derived_center_is_rejected(self):
         scene = spatial.Scene("conflict")

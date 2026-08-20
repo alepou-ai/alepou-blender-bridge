@@ -153,13 +153,13 @@ def _operator_mesh(kind, params):
         temp.dimensions = params["size"]
         bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     elif kind == "sphere":
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, radius=params["radius"])
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=params["segments"], ring_count=params["rings"], radius=params["radius"])
         temp = bpy.context.object
     elif kind == "cylinder":
-        bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=params["radius"], depth=params["length"])
+        bpy.ops.mesh.primitive_cylinder_add(vertices=params["segments"], radius=params["radius"], depth=params["length"])
         temp = bpy.context.object
     elif kind == "cone":
-        bpy.ops.mesh.primitive_cone_add(vertices=64, radius1=params["radius1"], radius2=params["radius2"], depth=params["length"])
+        bpy.ops.mesh.primitive_cone_add(vertices=params["segments"], radius1=params["radius1"], radius2=params["radius2"], depth=params["length"])
         temp = bpy.context.object
     elif kind == "plane":
         bpy.ops.mesh.primitive_plane_add(size=1.0)
@@ -168,8 +168,8 @@ def _operator_mesh(kind, params):
         bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     elif kind == "torus":
         bpy.ops.mesh.primitive_torus_add(
-            major_segments=64,
-            minor_segments=24,
+            major_segments=params["major_segments"],
+            minor_segments=params["minor_segments"],
             mode="MAJOR_MINOR",
             major_radius=params["major_radius"],
             minor_radius=params["minor_radius"],
@@ -189,6 +189,31 @@ def _explicit_mesh(params):
     return mesh
 
 
+def _apply_shading(mesh, kind, params):
+    shading = params.get("shading") or {"mode": "flat" if kind in {"box", "plane"} else "smooth"}
+    mode = shading["mode"]
+    for edge in mesh.edges:
+        edge.use_edge_sharp = False
+    if mode == "flat":
+        for polygon in mesh.polygons:
+            polygon.use_smooth = False
+        return
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+    if mode == "smooth":
+        return
+    if mode != "smooth_by_angle":
+        raise RuntimeError("Unsupported Spatial shading mode: " + str(mode))
+    threshold = math.radians(float(shading["angleDegrees"]))
+    edge_faces = {}
+    for polygon in mesh.polygons:
+        for edge_key in polygon.edge_keys:
+            edge_faces.setdefault(tuple(sorted(edge_key)), []).append(polygon)
+    for edge in mesh.edges:
+        faces = edge_faces.get(tuple(sorted(edge.key)), [])
+        edge.use_edge_sharp = len(faces) != 2 or faces[0].normal.angle(faces[1].normal) > threshold + TOLERANCE
+
+
 def _replace_mesh(obj, desired):
     params = desired["parametersMeters"]
     kind = desired["kind"]
@@ -201,8 +226,7 @@ def _replace_mesh(obj, desired):
         mesh.materials.append(material)
     if old is not None and old.users == 0:
         bpy.data.meshes.remove(old)
-    for polygon in mesh.polygons:
-        polygon.use_smooth = kind not in {"box", "plane"}
+    _apply_shading(mesh, kind, params)
     bevel = params.get("bevel")
     modifier = obj.modifiers.get("SpatialBevel")
     if bevel:

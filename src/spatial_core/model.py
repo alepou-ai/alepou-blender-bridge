@@ -22,6 +22,7 @@ UNITS = {"mm": 0.001, "cm": 0.01, "m": 1.0, "in": 0.0254, "ft": 0.3048}
 PRIMITIVES = {"box", "cylinder", "sphere", "cone", "plane", "torus", "mesh", "empty"}
 RELATIONS = {"after", "before", "centered_on", "aligned_with"}
 AXES = {"X", "Y", "Z"}
+SHADING_MODES = {"flat", "smooth", "smooth_by_angle"}
 
 
 def _number(value: Number, path: str) -> float:
@@ -36,6 +37,12 @@ def _positive(value: Number, path: str, *, allow_zero: bool = False) -> float:
         operator = "non-negative" if allow_zero else "positive"
         raise InvalidParameterError(f"Expected a {operator} number, got {value!r}", path=path)
     return result
+
+
+def _segments(value: Any, path: str, *, minimum: int = 3) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise InvalidParameterError(f"Expected an integer >= {minimum}, got {value!r}", path=path)
+    return value
 
 
 def _vec2(value: Sequence[Number], path: str) -> Vec2:
@@ -98,6 +105,53 @@ class Bevel:
 
 
 @dataclass(frozen=True)
+class Shading:
+    mode: str
+    angle_degrees: float | None = None
+
+    def __post_init__(self) -> None:
+        normalized = str(self.mode).strip().lower()
+        if normalized not in SHADING_MODES:
+            raise InvalidParameterError(f"Shading mode must be one of {sorted(SHADING_MODES)}, got {self.mode!r}", path="shading.mode")
+        object.__setattr__(self, "mode", normalized)
+        if normalized == "smooth_by_angle":
+            angle = _positive(30.0 if self.angle_degrees is None else self.angle_degrees, "shading.angle_degrees")
+            if angle >= 180.0:
+                raise InvalidParameterError("Smooth-by-angle must be less than 180 degrees", path="shading.angle_degrees")
+            object.__setattr__(self, "angle_degrees", angle)
+        elif self.angle_degrees is not None:
+            raise InvalidParameterError(f"{normalized} shading does not accept an angle", path="shading.angle_degrees")
+
+    @classmethod
+    def flat(cls) -> "Shading":
+        return cls("flat")
+
+    @classmethod
+    def smooth(cls) -> "Shading":
+        return cls("smooth")
+
+    @classmethod
+    def smooth_by_angle(cls, angle_degrees: Number = 30) -> "Shading":
+        return cls("smooth_by_angle", _number(angle_degrees, "shading.angle_degrees"))
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"mode": self.mode}
+        if self.angle_degrees is not None:
+            result["angleDegrees"] = self.angle_degrees
+        return result
+
+
+def _shading(value: Shading | Mapping[str, Any] | str, path: str) -> dict[str, Any]:
+    if isinstance(value, Shading):
+        return value.to_dict()
+    if isinstance(value, str):
+        return Shading(value).to_dict()
+    if isinstance(value, Mapping):
+        return Shading(str(value.get("mode", "")), value.get("angleDegrees", value.get("angle_degrees"))).to_dict()
+    raise InvalidParameterError("shading must be a Shading, mode string, or mapping", path=path)
+
+
+@dataclass(frozen=True)
 class PrimitiveSpec:
     kind: str
     parameters: Mapping[str, Any]
@@ -128,23 +182,25 @@ class PrimitiveSpec:
         return cls(kind, raw, _vec3(rotation, "element.rotation"), metadata)
 
 
-def BoxSpec(*, size: Sequence[Number], bevel: Bevel | None = None, metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
+def BoxSpec(*, size: Sequence[Number], bevel: Bevel | None = None, shading: Shading | Mapping[str, Any] | str | None = None, metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
     parameters: dict[str, Any] = {"size": _vec3(size, "size")}
     if bevel:
         parameters["bevel"] = bevel.to_dict()
+    if shading is not None:
+        parameters["shading"] = shading
     return PrimitiveSpec("box", parameters, metadata=metadata or {})
 
 
-def CylinderSpec(*, radius: Number, length: Number, axis: str = "Z", metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
-    return PrimitiveSpec("cylinder", {"radius": radius, "length": length, "axis": axis}, metadata=metadata or {})
+def CylinderSpec(*, radius: Number, length: Number, axis: str = "Z", segments: int = 64, shading: Shading | Mapping[str, Any] | str | None = None, metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
+    return PrimitiveSpec("cylinder", {"radius": radius, "length": length, "axis": axis, "segments": segments, "shading": shading if shading is not None else Shading.smooth_by_angle()}, metadata=metadata or {})
 
 
-def SphereSpec(*, radius: Number, metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
-    return PrimitiveSpec("sphere", {"radius": radius}, metadata=metadata or {})
+def SphereSpec(*, radius: Number, segments: int = 48, rings: int = 24, shading: Shading | Mapping[str, Any] | str = "smooth", metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
+    return PrimitiveSpec("sphere", {"radius": radius, "segments": segments, "rings": rings, "shading": shading}, metadata=metadata or {})
 
 
-def ConeSpec(*, radius1: Number, radius2: Number, length: Number, axis: str = "Z", metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
-    return PrimitiveSpec("cone", {"radius1": radius1, "radius2": radius2, "length": length, "axis": axis}, metadata=metadata or {})
+def ConeSpec(*, radius1: Number, radius2: Number, length: Number, axis: str = "Z", segments: int = 64, shading: Shading | Mapping[str, Any] | str | None = None, metadata: Mapping[str, Any] | None = None) -> PrimitiveSpec:
+    return PrimitiveSpec("cone", {"radius1": radius1, "radius2": radius2, "length": length, "axis": axis, "segments": segments, "shading": shading if shading is not None else Shading.smooth_by_angle()}, metadata=metadata or {})
 
 
 def _validate_primitive(kind: str, parameters: dict[str, Any], path: str) -> dict[str, Any]:
@@ -163,8 +219,11 @@ def _validate_primitive(kind: str, parameters: dict[str, Any], path: str) -> dic
                 raise InvalidParameterError("A cone needs at least one non-zero radius", path=path)
         result["length"] = _positive(result.get("length"), f"{path}.length")
         result["axis"] = _axis(result.get("axis", "Z"), f"{path}.axis")
+        result["segments"] = _segments(result.get("segments", 64), f"{path}.segments")
     elif kind == "sphere":
         result["radius"] = _positive(result.get("radius"), f"{path}.radius")
+        result["segments"] = _segments(result.get("segments", 48), f"{path}.segments")
+        result["rings"] = _segments(result.get("rings", 24), f"{path}.rings")
     elif kind == "plane":
         result["size"] = tuple(_positive(item, f"{path}.size[{index}]") for index, item in enumerate(_vec2(result.get("size", ()), f"{path}.size")))
         result["normal"] = _axis(result.get("normal", "Z"), f"{path}.normal")
@@ -172,6 +231,8 @@ def _validate_primitive(kind: str, parameters: dict[str, Any], path: str) -> dic
         result["major_radius"] = _positive(result.get("major_radius"), f"{path}.major_radius")
         result["minor_radius"] = _positive(result.get("minor_radius"), f"{path}.minor_radius")
         result["axis"] = _axis(result.get("axis", "Z"), f"{path}.axis")
+        result["major_segments"] = _segments(result.get("major_segments", 64), f"{path}.major_segments")
+        result["minor_segments"] = _segments(result.get("minor_segments", 24), f"{path}.minor_segments")
     elif kind == "mesh":
         vertices = result.get("vertices")
         faces = result.get("faces")
@@ -194,6 +255,17 @@ def _validate_primitive(kind: str, parameters: dict[str, Any], path: str) -> dic
             result["bevel"] = Bevel(**bevel).to_dict()
         else:
             raise InvalidParameterError("bevel must be a Bevel or mapping", path=f"{path}.bevel")
+    default_shading = {
+        "box": Shading.flat(),
+        "plane": Shading.flat(),
+        "mesh": Shading.flat(),
+        "cylinder": Shading.smooth_by_angle(),
+        "cone": Shading.smooth_by_angle(),
+        "sphere": Shading.smooth(),
+        "torus": Shading.smooth(),
+    }.get(kind)
+    if default_shading is not None:
+        result["shading"] = _shading(result.get("shading", default_shading), f"{path}.shading")
     return result
 
 
@@ -435,29 +507,31 @@ class Scene:
         self.objects[id] = entity
         return entity
 
-    def box(self, id: str, *, size: Sequence[Number], bevel: Bevel | Mapping[str, Any] | None = None, **common: Any) -> Entity:
+    def box(self, id: str, *, size: Sequence[Number], bevel: Bevel | Mapping[str, Any] | None = None, shading: Shading | Mapping[str, Any] | str | None = None, **common: Any) -> Entity:
         parameters: dict[str, Any] = {"size": size}
         if bevel is not None:
             parameters["bevel"] = bevel
+        if shading is not None:
+            parameters["shading"] = shading
         return self._primitive(id, "box", parameters, **common)
 
-    def cylinder(self, id: str, *, radius: Number, length: Number, axis: str = "Z", **common: Any) -> Entity:
-        return self._primitive(id, "cylinder", {"radius": radius, "length": length, "axis": axis}, **common)
+    def cylinder(self, id: str, *, radius: Number, length: Number, axis: str = "Z", segments: int = 64, shading: Shading | Mapping[str, Any] | str | None = None, **common: Any) -> Entity:
+        return self._primitive(id, "cylinder", {"radius": radius, "length": length, "axis": axis, "segments": segments, "shading": shading if shading is not None else Shading.smooth_by_angle()}, **common)
 
-    def sphere(self, id: str, *, radius: Number, **common: Any) -> Entity:
-        return self._primitive(id, "sphere", {"radius": radius}, **common)
+    def sphere(self, id: str, *, radius: Number, segments: int = 48, rings: int = 24, shading: Shading | Mapping[str, Any] | str = "smooth", **common: Any) -> Entity:
+        return self._primitive(id, "sphere", {"radius": radius, "segments": segments, "rings": rings, "shading": shading}, **common)
 
-    def cone(self, id: str, *, radius1: Number, radius2: Number, length: Number, axis: str = "Z", **common: Any) -> Entity:
-        return self._primitive(id, "cone", {"radius1": radius1, "radius2": radius2, "length": length, "axis": axis}, **common)
+    def cone(self, id: str, *, radius1: Number, radius2: Number, length: Number, axis: str = "Z", segments: int = 64, shading: Shading | Mapping[str, Any] | str | None = None, **common: Any) -> Entity:
+        return self._primitive(id, "cone", {"radius1": radius1, "radius2": radius2, "length": length, "axis": axis, "segments": segments, "shading": shading if shading is not None else Shading.smooth_by_angle()}, **common)
 
     def plane(self, id: str, *, size: Sequence[Number], normal: str = "Z", **common: Any) -> Entity:
         return self._primitive(id, "plane", {"size": size, "normal": normal}, **common)
 
-    def torus(self, id: str, *, major_radius: Number, minor_radius: Number, axis: str = "Z", **common: Any) -> Entity:
-        return self._primitive(id, "torus", {"major_radius": major_radius, "minor_radius": minor_radius, "axis": axis}, **common)
+    def torus(self, id: str, *, major_radius: Number, minor_radius: Number, axis: str = "Z", major_segments: int = 64, minor_segments: int = 24, shading: Shading | Mapping[str, Any] | str = "smooth", **common: Any) -> Entity:
+        return self._primitive(id, "torus", {"major_radius": major_radius, "minor_radius": minor_radius, "axis": axis, "major_segments": major_segments, "minor_segments": minor_segments, "shading": shading}, **common)
 
-    def mesh(self, id: str, *, vertices: list[Sequence[Number]], faces: list[Sequence[int]], **common: Any) -> Entity:
-        return self._primitive(id, "mesh", {"vertices": vertices, "faces": faces}, **common)
+    def mesh(self, id: str, *, vertices: list[Sequence[Number]], faces: list[Sequence[int]], shading: Shading | Mapping[str, Any] | str = "flat", **common: Any) -> Entity:
+        return self._primitive(id, "mesh", {"vertices": vertices, "faces": faces, "shading": shading}, **common)
 
     def empty(self, id: str, **common: Any) -> Entity:
         return self._primitive(id, "empty", {}, **common)
@@ -735,6 +809,7 @@ __all__ = [
     "PrimitiveSpec",
     "Relation",
     "Scene",
+    "Shading",
     "SphereSpec",
     "UNITS",
 ]
