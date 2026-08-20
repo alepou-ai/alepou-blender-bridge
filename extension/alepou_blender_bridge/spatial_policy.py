@@ -33,6 +33,8 @@ def read_mode(bridge_root: Path) -> str:
 
 
 def representation_kind(request: dict[str, Any], action_names: list[str]) -> str:
+    if any(name.startswith("spatial.") for name in action_names):
+        return "spatial"
     if "script.execute" not in action_names:
         return "support"
     representation = request.get("representation")
@@ -44,6 +46,8 @@ def representation_kind(request: dict[str, Any], action_names: list[str]) -> str
 
 def enforce(bridge_root: Path, request: dict[str, Any], action_names: list[str]) -> str:
     mode = read_mode(bridge_root)
+    if any(name.startswith("spatial.") for name in action_names) and "script.execute" in action_names:
+        raise SpatialPolicyError("Spatial and raw bpy authoring must use separate recorded requests")
     kind = representation_kind(request, action_names)
     if kind == "spatial" and mode == "off":
         raise SpatialPolicyError("Spatial authoring is disabled for this project")

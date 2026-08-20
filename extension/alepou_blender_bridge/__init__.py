@@ -10,7 +10,7 @@ from . import protocol, service, spatial_policy
 bl_info = {
     "name": "Alepou Blender Bridge",
     "author": "Alepou",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Alepou",
     "description": "Auditable local bridge for Alepou-managed AI sessions",

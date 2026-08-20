@@ -5,7 +5,9 @@ observe and work through Blender. It exports compact exact state, accepts
 atomic local requests, captures deterministic diagnostic renders, records
 script evidence, and keeps the normal Blender integration on the main thread.
 
-This repository contains two independent pieces:
+This repository contains two independently usable surfaces. The Blender
+extension is the complete normal-user installation; the CLI and wheel are
+optional developer surfaces.
 
 - `extension/alepou_blender_bridge/` — the Blender extension/add-on;
 - `src/alepou_blender/` — a thin CLI for the local file contract.
@@ -49,8 +51,11 @@ python scripts\build_packages.py `
 ```
 
 For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.2.0.zip`. For Blender 4.1, use
-the Add-ons install control and choose the `-legacy.zip` package. Enable
+Disk** and choose `dist/alepou_blender_bridge-0.2.1.zip`. The extension package
+includes the Spatial Python runtime used inside Blender; normal Alepou users do
+not install a Python wheel or run `pip`. For Blender 4.1, use the Add-ons install
+control and choose the `-legacy.zip` package. That legacy package retains the
+raw bridge but does not include Blender's extension-managed Spatial wheel. Enable
 **Alepou Blender Bridge**. During source development you can instead add
 `extension/` to Blender's Python path and register the package directly.
 
@@ -66,9 +71,10 @@ Trusted Development remains active until revoked, the project binding changes,
 or Blender closes. **STOP Bridge** remains available in Blender's 3D View
 sidebar and blocks new claims immediately.
 
-## CLI
+## Optional developer CLI
 
-Install the thin client into any regular Python environment:
+The wheel and editable install remain useful for library development, external
+automation, and CI. They are not part of the normal Blender installation flow:
 
 ```powershell
 python -m pip install -e .
@@ -101,6 +107,35 @@ alepou-blender --project D:\path\to\project spatial-mode off
 - `opt_in` allows either representation when the request selects it;
 - `required` rejects raw `script.execute` authoring for truthful benchmarks;
 - no mode silently falls back from Spatial to raw `bpy`.
+
+Blender 4.2+ extension packages accept bundled `spatial.execute`,
+`spatial.inspect`, and `spatial.why` actions directly. A normal Alepou session
+can therefore submit Spatial Python or JSON through the existing file contract
+without installing anything into the user's system Python. The extension
+records the authored source, normalized IR, resolved state, compile plan, and
+generated `bpy` under the command run. YAML is available when a compatible
+PyYAML wheel is present; Python and JSON are the self-contained package formats.
+
+```json
+{
+  "schemaVersion": 1,
+  "commandId": "spatial-analyser-001",
+  "representation": {
+    "kind": "spatial",
+    "version": "0.1",
+    "fallbackAllowed": false
+  },
+  "actions": [
+    {
+      "action": "spatial.execute",
+      "sourceFormat": "python",
+      "compileMode": "update",
+      "source": "import spatial\nscene = spatial.Scene('demo', units='mm')\nscene.box('housing', size=(400, 300, 200))"
+    },
+    {"action": "state.refresh"}
+  ]
+}
+```
 
 A compact Python authoring example:
 

@@ -17,7 +17,7 @@ from typing import Any, Callable
 import bpy
 from bpy.app.handlers import persistent
 
-from . import capture, protocol, spatial_policy, state
+from . import capture, protocol, spatial_policy, spatial_runtime, state
 
 OBSERVATION_ACTIONS = {
     "bridge.ping",
@@ -33,9 +33,12 @@ OBSERVATION_ACTIONS = {
     "material.inspect",
     "capture.diagnostic",
     "capture.viewport",
+    "spatial.inspect",
+    "spatial.why",
 }
 MUTATION_ACTIONS = {
     "script.execute",
+    "spatial.execute",
     "scene.save_copy",
     "scene.restore_snapshot",
     "object.select",
@@ -204,7 +207,7 @@ class BridgeService:
                 "mutationActions": sorted(MUTATION_ACTIONS),
                 "diagnosticViews": sorted(capture.VIEW_DIRECTIONS),
                 "diagnosticModes": ["beauty", "clay", "silhouette", "wireframe"],
-                "spatialAuthoring": spatial_policy.describe(root),
+                "spatialAuthoring": {**spatial_policy.describe(root), **spatial_runtime.describe()},
                 "limits": {"objectsSummary": 500, "jsonRequestBytes": protocol.DEFAULT_MAX_JSON_BYTES},
             },
         )
@@ -491,7 +494,10 @@ class BridgeService:
             "material.inspect": lambda item: state.material_inspect(item.get("material") or item.get("name")),
             "capture.diagnostic": lambda item: capture.diagnostic_capture(item, root / "captures", command_id),
             "capture.viewport": lambda item: capture.viewport_capture(item, root / "captures", command_id),
+            "spatial.inspect": lambda item: self._inspect_spatial(run_root, index, item, why=False),
+            "spatial.why": lambda item: self._inspect_spatial(run_root, index, item, why=True),
             "script.execute": lambda item: self._execute_script(root, run_root, command_id, index, item),
+            "spatial.execute": lambda item: self._execute_spatial(root, run_root, command_id, index, item),
             "scene.save_copy": lambda item: self._save_copy(item),
             "scene.restore_snapshot": lambda item: self._restore_snapshot(root, item),
             "object.select": lambda item: self._select_object(item),
@@ -557,6 +563,62 @@ class BridgeService:
         if failure:
             raise ActionFailed("Blender Python raised after possible scene mutation; inspect state before restoring or retrying", details)
         return details
+
+    def _write_spatial_evidence(self, run_root: Path, index: int, prepared: spatial_runtime.PreparedSpatial) -> None:
+        suffix = {"python": "py", "json": "json", "yaml": "yaml"}[prepared.source_format]
+        protocol.atomic_write_text(run_root / f"action-{index:02d}.spatial.{suffix}", prepared.source)
+        protocol.atomic_write_json(run_root / f"action-{index:02d}.spatial-source.normalized.json", prepared.scene.to_dict())
+        protocol.atomic_write_json(run_root / f"action-{index:02d}.spatial-resolved.json", prepared.resolved.to_dict())
+        protocol.atomic_write_json(run_root / f"action-{index:02d}.spatial-plan.json", prepared.plan.to_dict())
+        protocol.atomic_write_text(run_root / f"action-{index:02d}.spatial.generated.py", prepared.compiled.source)
+
+    def _prepare_spatial(self, run_root: Path, index: int, action: dict[str, Any]) -> spatial_runtime.PreparedSpatial:
+        try:
+            prepared = spatial_runtime.prepare(action)
+        except Exception as error:
+            raise ActionFailed(
+                "Spatial source failed before Blender mutation",
+                {"stage": "resolve", "type": type(error).__name__, "message": str(error), "traceback": traceback.format_exc()},
+            ) from error
+        self._write_spatial_evidence(run_root, index, prepared)
+        return prepared
+
+    def _execute_spatial(self, root: Path, run_root: Path, command_id: str, index: int, action: dict[str, Any]) -> dict[str, Any]:
+        prepared = self._prepare_spatial(run_root, index, action)
+        spatial_details = {
+            "sceneId": prepared.scene.id,
+            "sourceFormat": prepared.source_format,
+            "sourceHash": prepared.resolved.source_hash,
+            "compileMode": prepared.plan.mode,
+            "force": prepared.plan.force,
+            "generatedSourceHash": prepared.compiled.source_hash,
+            "fallbackAllowed": False,
+        }
+        if prepared.plan.mode == "dry_run":
+            return {**spatial_details, "status": "dry-run", "plan": prepared.plan.to_dict()}
+        executed = self._execute_script(
+            root,
+            run_root,
+            command_id,
+            index,
+            {"source": prepared.compiled.source},
+        )
+        return {**spatial_details, "status": "applied", "execution": executed}
+
+    def _inspect_spatial(self, run_root: Path, index: int, action: dict[str, Any], *, why: bool) -> dict[str, Any]:
+        prepared = self._prepare_spatial(run_root, index, {**action, "compileMode": "dry_run"})
+        target_key = "selector" if why else "entity"
+        target = str(action.get(target_key) or "").strip()
+        if not target:
+            raise ActionFailed(f"spatial.{'why' if why else 'inspect'} requires {target_key}")
+        value = prepared.resolved.why(target) if why else prepared.resolved.inspect(target)
+        return {
+            "sceneId": prepared.scene.id,
+            "sourceFormat": prepared.source_format,
+            "sourceHash": prepared.resolved.source_hash,
+            target_key: target,
+            "value": value,
+        }
 
     def _allowed_destination(self, value: Any) -> Path:
         if not value:

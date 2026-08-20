@@ -18,6 +18,12 @@ SPEC = importlib.util.spec_from_file_location("alepou_blender_spatial_policy", P
 policy = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(policy)
+RUNTIME_PATH = REPO / "extension" / "alepou_blender_bridge" / "spatial_runtime.py"
+RUNTIME_SPEC = importlib.util.spec_from_file_location("alepou_blender_spatial_runtime", RUNTIME_PATH)
+runtime = importlib.util.module_from_spec(RUNTIME_SPEC)
+assert RUNTIME_SPEC and RUNTIME_SPEC.loader
+sys.modules[RUNTIME_SPEC.name] = runtime
+RUNTIME_SPEC.loader.exec_module(runtime)
 
 
 class SpatialBlenderTests(unittest.TestCase):
@@ -56,6 +62,20 @@ class SpatialBlenderTests(unittest.TestCase):
                 policy.enforce(root, raw, ["script.execute"])
             self.assertEqual(policy.enforce(root, {"actions": [{"action": "scene.summary"}]}, ["scene.summary"]), "support")
 
+    def test_direct_spatial_actions_are_policy_gated(self):
+        request = {
+            "representation": {"kind": "spatial", "fallbackAllowed": False},
+            "actions": [{"action": "spatial.execute", "sourceFormat": "python", "source": "scene = None"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(policy.SpatialPolicyError):
+                policy.enforce(root, request, ["spatial.execute"])
+            (root / "spatial-mode.json").write_text('{"mode":"opt_in"}', encoding="utf-8")
+            self.assertEqual(policy.enforce(root, request, ["spatial.execute"]), "spatial")
+            with self.assertRaises(policy.SpatialPolicyError):
+                policy.enforce(root, request, ["spatial.execute", "script.execute"])
+
     def test_spatial_request_requires_explicit_no_fallback(self):
         request = {
             "representation": {"kind": "spatial"},
@@ -66,6 +86,35 @@ class SpatialBlenderTests(unittest.TestCase):
             (root / "spatial-mode.json").write_text(json.dumps({"mode": "opt_in"}), encoding="utf-8")
             with self.assertRaises(policy.SpatialPolicyError):
                 policy.enforce(root, request, ["script.execute"])
+
+    def test_bundled_runtime_prepares_python_and_json_without_external_cli(self):
+        python_source = "\n".join(
+            (
+                "import spatial",
+                "scene = spatial.Scene('lamp_skeleton', units='mm')",
+                "scene.cylinder('base', radius=120, length=20, axis='Z', center=(0, 0, 10))",
+                "scene.cylinder('arm', radius=12, length=400, axis='Z', center=(0, 0, 220))",
+            )
+        )
+        prepared = runtime.prepare(
+            {"sourceFormat": "python", "source": python_source, "compileMode": "update"}
+        )
+        self.assertEqual(prepared.scene.id, "lamp_skeleton")
+        self.assertEqual(prepared.plan.mode, "update")
+        self.assertIn("SPATIAL_RESULT_JSON", prepared.compiled.source)
+
+        encoded = prepared.scene.to_json()
+        repeated = runtime.prepare(
+            {"sourceFormat": "json", "source": encoded, "compileMode": "dry_run"}
+        )
+        self.assertEqual(prepared.scene.canonical_json(), repeated.scene.canonical_json())
+        self.assertEqual(repeated.plan.mode, "dry_run")
+        self.assertTrue(runtime.describe()["bundled"])
+        self.assertFalse(runtime.describe()["externalPythonPackageRequired"])
+
+    def test_bundled_python_requires_a_scene_result(self):
+        with self.assertRaises(runtime.BundledSpatialError):
+            runtime.prepare({"sourceFormat": "python", "source": "answer = 42"})
 
 
 if __name__ == "__main__":
