@@ -39,6 +39,100 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(cli.ClientError):
                 cli.submit(root, {"commandId": "cmd-1"}, query=False, timeout=0.1, wait=False)
 
+    def test_spatial_mode_defaults_off_and_can_be_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            common = {"project": directory, "timeout": 0.1, "no_wait": True, "representation_mode": None}
+            read = cli.run(argparse.Namespace(command="spatial-mode", value=None, **common))
+            self.assertEqual(read["mode"], "off")
+            written = cli.run(argparse.Namespace(command="spatial-mode", value="opt_in", **common))
+            self.assertEqual(written["mode"], "opt_in")
+            path = Path(directory) / "plan" / "blender" / "spatial-mode.json"
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["mode"], "opt_in")
+
+    def test_spatial_dry_run_is_gated_and_does_not_submit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            source = project / "scene.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "spatial": "0.1",
+                        "scene": {"id": "cli_demo", "units": "m", "up": "Z"},
+                        "objects": {"box": {"type": "box", "size": [1, 2, 3], "center": [0, 0, 1.5]}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                project=str(project),
+                command="spatial",
+                path=str(source),
+                compile_mode="dry_run",
+                force=False,
+                session=None,
+                id=None,
+                timeout=0.1,
+                no_wait=True,
+                representation_mode=None,
+            )
+            with self.assertRaises(cli.ClientError):
+                cli.run(args)
+            cli.run(
+                argparse.Namespace(
+                    project=str(project),
+                    command="spatial-mode",
+                    value="opt_in",
+                    timeout=0.1,
+                    no_wait=True,
+                    representation_mode=None,
+                )
+            )
+            result = cli.run(args)
+            self.assertEqual(result["status"], "dry-run")
+            self.assertFalse(result["plan"]["fallbackAllowed"])
+            self.assertFalse((project / "plan" / "blender" / "commands" / "pending").exists())
+            inspected = cli.run(
+                argparse.Namespace(
+                    project=str(project),
+                    command="spatial-inspect",
+                    path=str(source),
+                    entity="box",
+                    timeout=0.1,
+                    no_wait=True,
+                    representation_mode=None,
+                )
+            )
+            self.assertEqual(inspected["value"]["id"], "box")
+
+    def test_required_mode_rejects_raw_bpy_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            source = project / "raw.py"
+            source.write_text("import bpy\n", encoding="utf-8")
+            cli.run(
+                argparse.Namespace(
+                    project=str(project),
+                    command="spatial-mode",
+                    value="required",
+                    timeout=0.1,
+                    no_wait=True,
+                    representation_mode=None,
+                )
+            )
+            with self.assertRaises(cli.ClientError):
+                cli.run(
+                    argparse.Namespace(
+                        project=str(project),
+                        command="script",
+                        path=str(source),
+                        session=None,
+                        id=None,
+                        timeout=0.1,
+                        no_wait=True,
+                        representation_mode=None,
+                    )
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

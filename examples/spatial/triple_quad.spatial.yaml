@@ -1,0 +1,89 @@
+spatial: '0.1'
+scene:
+  id: triple_quad_demo
+  units: mm
+  up: Z
+frames:
+  analyser_frame:
+    parent: world
+    origin: [0.0, 0.0, 430.0]
+    rotation: [0.0, 0.0, 0.0]
+axes:
+  beam:
+    frame: analyser_frame
+    origin: [0.0, 0.0, 0.0]
+    direction: [1.0, 0.0, 0.0]
+assemblies:
+  analyser:
+    children: [Q1_rods, collision_cell, Q3_rods]
+    frame: analyser_frame
+    metadata:
+      role: analyser
+objects:
+  collision_cell:
+    type: cylinder
+    radius: 40.0
+    length: 220.0
+    axis: X
+    frame: analyser_frame
+    metadata:
+      role: chamber
+arrays:
+  Q1_rods:
+    type: radial
+    count: 4
+    axis: beam
+    radius: 55.0
+    start_angle: 45.0
+    element:
+      type: cylinder
+      radius: 18.0
+      length: 300.0
+      axis: X
+      metadata:
+        role: quadrupole_rod
+    frame: analyser_frame
+    center: [-290.0, 0.0, 0.0]
+    metadata:
+      role: quadrupole
+  Q3_rods:
+    type: radial
+    count: 4
+    axis: beam
+    radius: 55.0
+    start_angle: 45.0
+    element:
+      type: cylinder
+      radius: 18.0
+      length: 300.0
+      axis: X
+      metadata:
+        role: quadrupole_rod
+    frame: analyser_frame
+    metadata:
+      role: quadrupole
+relations:
+- id: q1_on_beam
+  subject: Q1_rods
+  relation: centered_on
+  object: beam
+- id: cell_after_q1
+  subject: collision_cell
+  relation: after
+  object: Q1_rods
+  axis: X
+  gap: 60.0
+- id: cell_on_beam
+  subject: collision_cell
+  relation: centered_on
+  object: beam
+- id: q3_after_cell
+  subject: Q3_rods
+  relation: after
+  object: collision_cell
+  axis: X
+  gap: 60.0
+- id: q3_on_beam
+  subject: Q3_rods
+  relation: centered_on
+  object: beam

@@ -5,12 +5,12 @@ from __future__ import annotations
 import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 
-from . import service
+from . import protocol, service, spatial_policy
 
 bl_info = {
     "name": "Alepou Blender Bridge",
     "author": "Alepou",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Alepou",
     "description": "Auditable local bridge for Alepou-managed AI sessions",
@@ -85,6 +85,7 @@ class ALEPOU_Preferences(bpy.types.AddonPreferences):
         layout.prop(self, "trust_mode")
         layout.prop(self, "session_id")
         layout.prop(self, "allow_external_save_paths")
+        _draw_spatial_controls(layout, service.get_service())
         layout.operator("alepou.bridge_export_state", icon="FILE_REFRESH")
         layout.operator("alepou.bridge_stop", icon="CANCEL")
 
@@ -119,6 +120,50 @@ class ALEPOU_OT_Stop(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class ALEPOU_OT_SetSpatialMode(bpy.types.Operator):
+    bl_idname = "alepou.bridge_set_spatial_mode"
+    bl_label = "Set Spatial Mode"
+    bl_description = "Set the explicit project-level Spatial representation policy"
+
+    mode: EnumProperty(
+        name="Spatial Mode",
+        items=(
+            ("off", "Off", "Raw bpy only; reject Spatial authoring"),
+            ("opt_in", "Opt In", "Allow raw bpy or explicitly selected Spatial authoring"),
+            ("required", "Required", "Require Spatial and reject raw bpy authoring"),
+        ),
+        default="off",
+    )
+
+    def execute(self, _context: object) -> set[str]:
+        bridge = service.get_service()
+        root = bridge.root()
+        if root is None:
+            self.report({"ERROR"}, "Bind an existing Alepou project root first")
+            return {"CANCELLED"}
+        protocol.atomic_write_json(
+            spatial_policy.policy_path(root),
+            {"schemaVersion": 1, "mode": self.mode, "fallbackAllowed": False},
+        )
+        bridge.export_capabilities(root)
+        bridge.write_health(root)
+        self.report({"INFO"}, f"Spatial mode: {self.mode.replace('_', ' ')}")
+        return {"FINISHED"}
+
+
+def _draw_spatial_controls(layout: object, bridge: object) -> None:
+    root = bridge.root()
+    try:
+        mode = spatial_policy.read_mode(root) if root else "off"
+    except spatial_policy.SpatialPolicyError:
+        mode = "invalid"
+    layout.label(text=f"Spatial: {mode.replace('_', ' ').title()}")
+    row = layout.row(align=True)
+    for value, label in (("off", "Off"), ("opt_in", "Opt In"), ("required", "Required")):
+        operator = row.operator("alepou.bridge_set_spatial_mode", text=label, depress=mode == value)
+        operator.mode = value
+
+
 class ALEPOU_PT_Bridge(bpy.types.Panel):
     bl_label = "Alepou Blender Bridge"
     bl_idname = "ALEPOU_PT_blender_bridge"
@@ -129,9 +174,11 @@ class ALEPOU_PT_Bridge(bpy.types.Panel):
     def draw(self, context: object) -> None:
         layout = self.layout
         preferences = context.preferences.addons[__package__].preferences
+        bridge = service.get_service()
         layout.label(text=f"Authority: {preferences.trust_mode.replace('_', ' ').title()}")
         layout.label(text=f"Project: {preferences.project_root or '(not bound)'}")
         layout.prop(preferences, "processor_enabled", text="Processing")
+        _draw_spatial_controls(layout, bridge)
         layout.operator("alepou.bridge_export_state", icon="FILE_REFRESH")
         layout.operator("alepou.bridge_stop", icon="CANCEL")
 
@@ -140,6 +187,7 @@ CLASSES = (
     ALEPOU_Preferences,
     ALEPOU_OT_ExportState,
     ALEPOU_OT_Stop,
+    ALEPOU_OT_SetSpatialMode,
     ALEPOU_PT_Bridge,
 )
 

@@ -17,7 +17,7 @@ from typing import Any, Callable
 import bpy
 from bpy.app.handlers import persistent
 
-from . import capture, protocol, state
+from . import capture, protocol, spatial_policy, state
 
 OBSERVATION_ACTIONS = {
     "bridge.ping",
@@ -204,6 +204,7 @@ class BridgeService:
                 "mutationActions": sorted(MUTATION_ACTIONS),
                 "diagnosticViews": sorted(capture.VIEW_DIRECTIONS),
                 "diagnosticModes": ["beauty", "clay", "silhouette", "wireframe"],
+                "spatialAuthoring": spatial_policy.describe(root),
                 "limits": {"objectsSummary": 500, "jsonRequestBytes": protocol.DEFAULT_MAX_JSON_BYTES},
             },
         )
@@ -288,6 +289,7 @@ class BridgeService:
             "stateRevision": self.state_revision,
             "lastExportAt": self.last_export_at,
             "trustMode": self.trust_mode(),
+            "spatialMode": spatial_policy.read_mode(root),
             "owningSession": self.owning_session(),
             "recoverySnapshotStatus": "available" if any((root / "recovery").glob("*.blend")) else "none",
             "blockedReason": self.blocked_reason,
@@ -413,7 +415,7 @@ class BridgeService:
                 raise protocol.ProtocolError(f"Unsupported actions: {', '.join(unsupported)}")
             if query and any(name in MUTATION_ACTIONS for name in action_names):
                 raise RejectedRequest("Mutation actions must use commands/pending")
-            self._authorize(request, action_names)
+            self._authorize(root, request, action_names)
             self.active_command = command_id
             self.write_health(root)
             run_root = root / "runs" / command_id
@@ -459,7 +461,11 @@ class BridgeService:
         self.export_state(root, reason=f"request_{result_status}")
         self.write_health(root)
 
-    def _authorize(self, request: dict[str, Any], action_names: list[str]) -> None:
+    def _authorize(self, root: Path, request: dict[str, Any], action_names: list[str]) -> None:
+        try:
+            spatial_policy.enforce(root, request, action_names)
+        except spatial_policy.SpatialPolicyError as error:
+            raise RejectedRequest(str(error)) from error
         if not any(name in MUTATION_ACTIONS for name in action_names):
             return
         if self.trust_mode() != "trusted_development":

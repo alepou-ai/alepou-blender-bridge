@@ -13,6 +13,11 @@ This repository contains two independent pieces:
 The bridge does not require Alepou to use. Alepou is the recommended control
 plane for project continuity, task tracking, and AI sessions.
 
+The repository also contains an **experimental, disabled-by-default Spatial
+vertical slice**. Spatial is a semantic authoring representation layered on the
+working bridge; it does not replace raw Blender Python and is not yet a claim
+of superior modelling quality.
+
 > **Alpha:** use a version-controlled project or disposable `.blend` while
 > evaluating script execution. Arbitrary Blender Python is powerful and a
 > failed script may already have mutated the scene.
@@ -44,7 +49,7 @@ python scripts\build_packages.py `
 ```
 
 For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.1.0.zip`. For Blender 4.1, use
+Disk** and choose `dist/alepou_blender_bridge-0.2.0.zip`. For Blender 4.1, use
 the Add-ons install control and choose the `-legacy.zip` package. Enable
 **Alepou Blender Bridge**. During source development you can instead add
 `extension/` to Blender's Python path and register the package directly.
@@ -74,6 +79,78 @@ alepou-blender --project D:\path\to\project script .\build_scene.py --session my
 
 Every command prints one JSON envelope. `submit` accepts an existing request
 file for advanced use. The CLI never imports `bpy`.
+
+## Experimental Spatial authoring
+
+Spatial Python and Spatial YAML/JSON normalize to the same backend-neutral IR.
+The core records stable entity identity, frames, axes, anchors, assemblies,
+linear/grid/radial repetition, simple relations, resolved state, and `why`
+provenance. The Blender backend turns a resolved compile plan into one recorded
+`script.execute` request; Spatial Core never imports `bpy`.
+
+The project mode is explicit and enforced by both the CLI and Blender service:
+
+```powershell
+alepou-blender --project D:\path\to\project spatial-mode
+alepou-blender --project D:\path\to\project spatial-mode opt_in
+alepou-blender --project D:\path\to\project spatial-mode required
+alepou-blender --project D:\path\to\project spatial-mode off
+```
+
+- `off` is the default: raw `bpy` works and Spatial authoring is rejected;
+- `opt_in` allows either representation when the request selects it;
+- `required` rejects raw `script.execute` authoring for truthful benchmarks;
+- no mode silently falls back from Spatial to raw `bpy`.
+
+A compact Python authoring example:
+
+```python
+import spatial
+
+scene = spatial.Scene("analyser", units="mm")
+frame = scene.frame("analyser_frame", origin=(0, 0, 430))
+beam = scene.axis("beam", frame=frame, direction=(1, 0, 0))
+
+q1 = scene.radial_array(
+    "Q1_rods",
+    count=4,
+    axis=beam,
+    radius=55,
+    start_angle=45,
+    element=spatial.CylinderSpec(radius=18, length=300, axis="X"),
+    frame=frame,
+    center=(-290, 0, 0),
+)
+cell = scene.cylinder("collision_cell", radius=40, length=220, axis="X", frame=frame)
+cell.after(q1, gap=60, axis="X", id="cell_after_q1")
+cell.center_on(beam, id="cell_on_beam")
+
+resolved = scene.resolve()
+print(resolved.inspect("collision_cell"))
+print(resolved.why("collision_cell.center.x"))
+scene.write_yaml("analyser.spatial.yaml")
+```
+
+Compile a serialized source through the live bridge only after opting in:
+
+```powershell
+alepou-blender --project D:\path\to\project spatial analyser.spatial.yaml --compile-mode dry_run
+alepou-blender --project D:\path\to\project spatial-inspect analyser.spatial.yaml collision_cell
+alepou-blender --project D:\path\to\project spatial-why analyser.spatial.yaml collision_cell.center.x
+alepou-blender --project D:\path\to\project spatial analyser.spatial.yaml --compile-mode update --session my-session
+```
+
+Compilation writes the normalized source, resolved state, compile plan, and
+generated Blender Python into the command's bridge run directory. Managed
+objects carry `spatial.*` provenance. Updates preserve semantic object identity,
+leave unrelated raw Blender objects untouched, and reject conflicting external
+changes unless an inspected caller explicitly uses `--force`.
+
+The initial relation solver is intentionally small: `after`, `before`,
+`centered_on`, and `aligned_with` operate deterministically on supported shared,
+axis-aligned frames. Unsupported orientations and constraint cycles fail with
+repairable errors. This is not a general CAD solver, organic sculpting system,
+or custom language.
 
 ## Request envelope
 
@@ -138,3 +215,15 @@ The real Blender smoke script accepts a temporary project root:
 
 It exercises health, atomic claims, exact state, trusted script execution,
 object inspection, diagnostic rendering, and save-copy evidence.
+
+The real Spatial compiler smoke is separate:
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
+  --background --factory-startup --python scripts\spatial_blender_smoke.py -- `
+  --output D:\temp\spatial-smoke.blend
+```
+
+It builds a semantic triple-quadrupole assembly, edits the chamber length,
+re-solves both declared gaps, preserves stable managed Blender object identity,
+and proves that an unrelated raw Blender object survives the update.
