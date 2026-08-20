@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "alepou_blender_bridge"
+version = "0.1.0"
+name = "Alepou Blender Bridge"
+tagline = "Auditable local bridge for AI-assisted Blender work"
+maintainer = "Alepou <hello@alepou.ai>"
+type = "add-on"
+website = "https://alepou.ai"
+tags = ["Development", "Pipeline"]
+blender_version_min = "4.1.0"
+license = ["SPDX:Apache-2.0"]
+
+[permissions]
+files = "Read and write the explicitly bound Alepou project"
