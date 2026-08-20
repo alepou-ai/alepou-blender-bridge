@@ -191,6 +191,35 @@ The values are retained in normalized IR and object provenance, so a later edit
 can distinguish an intentional eight-sided control from a mechanical cylinder
 that must retain a round silhouette.
 
+Reusable assets can also declare their semantic root, pivot, ground plane, and
+orientation. Spatial uses the named anchor for horizontal centring and the root
+assembly bounds for grounding; it does not guess the pivot from the overall
+visual bounding box. That matters for articulated assets such as a desk lamp,
+whose shade can extend far beyond its base:
+
+```python
+base.anchor(
+    "asset_origin",
+    position=(0, 0, -18),
+    direction=(1, 0, 0),
+    up=(0, 0, 1),
+)
+lamp = scene.assembly("lamp", children=(base, lower_arm, upper_arm, shade))
+scene.asset(
+    root=lamp,
+    origin="base.asset_origin",
+    center_axes=("X", "Y"),
+    ground_axis="Z",
+    up="Z",
+    forward="X",
+)
+```
+
+The resolved asset root becomes the Blender origin, the declared base anchor is
+centred on X/Y, and the asset rests on Z=0. The normalized constitution is
+included in resolved state, compile plans, Blender scene provenance, and Bridge
+scene summaries.
+
 Compile a serialized source through the live bridge only after opting in:
 
 ```powershell
@@ -289,7 +318,8 @@ re-solves both declared gaps, preserves stable managed Blender object identity,
 and proves that an unrelated raw Blender object survives the update.
 
 Targeted real-Blender regressions also cover hierarchy/material update
-preservation, ordinary Bridge Spatial-ID export, and geometry quality/shading:
+preservation, ordinary Bridge Spatial-ID export, geometry quality/shading, and
+reusable-asset origin constitution:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
@@ -298,4 +328,6 @@ preservation, ordinary Bridge Spatial-ID export, and geometry quality/shading:
   --background --factory-startup --python scripts\spatial_state_identity_regression.py
 & 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
   --background --factory-startup --python scripts\spatial_geometry_quality_regression.py
+& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
+  --background --factory-startup --python scripts\spatial_asset_constitution_regression.py
 ```

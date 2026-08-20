@@ -18,6 +18,7 @@ from .policy import AuthoringPolicy, SpatialMode
 from .model import (
     Anchor,
     Assembly,
+    AssetConstitution,
     Axis,
     Bevel,
     BoxSpec,
@@ -40,6 +41,7 @@ __all__ = [
     "AuthoringPolicy",
     "Anchor",
     "Assembly",
+    "AssetConstitution",
     "Axis",
     "Bevel",
     "Bounds",

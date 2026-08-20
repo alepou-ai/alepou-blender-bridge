@@ -130,6 +130,46 @@ class SpatialCoreTests(unittest.TestCase):
         with self.assertRaises(InvalidParameterError):
             spatial.Shading.smooth_by_angle(180)
 
+    def test_asset_constitution_places_declared_pivot_on_origin_and_ground(self):
+        scene = spatial.Scene("lamp_asset", units="mm")
+        base_frame = scene.frame("base_frame", origin=(-1050, 0, 780))
+        base = scene.cylinder(
+            "base_body",
+            radius=138,
+            length=360,
+            axis="Z",
+            frame=base_frame,
+            center=(0, 0, -560),
+        )
+        base.anchor("asset_origin", position=(0, 0, -180), direction=(1, 0, 0), up=(0, 0, 1))
+        root = scene.assembly("lamp", children=(base,))
+        scene.asset(
+            root=root,
+            origin="base_body.asset_origin",
+            center_axes=("X", "Y"),
+            ground_axis="Z",
+            up="Z",
+            forward="X",
+        )
+
+        resolved = scene.resolve()
+        self.assertEqual(resolved.entities["lamp"].world_center, (0.0, 0.0, 0.0))
+        self.assertEqual(resolved.entities["base_body"].world_center, (0.0, 0.0, 180.0))
+        self.assertEqual(resolved.entities["lamp"].bounds.minimum[2], 0.0)
+        self.assertEqual(resolved.asset["translation"], [1050.0, -0.0, -40.0])
+        self.assertEqual(resolved.asset["originWorld"], [0.0, 0.0, 0.0])
+        self.assertEqual(resolved.inspect("lamp")["assetConstitution"]["origin"], "base_body.asset_origin")
+        self.assertEqual(spatial.Scene.from_dict(scene.to_dict()).canonical_json(), scene.canonical_json())
+
+        outsider_scene = spatial.Scene("bad_asset")
+        member = outsider_scene.box("member", size=(1, 1, 1))
+        outsider = outsider_scene.box("outsider", size=(1, 1, 1))
+        outsider.anchor("origin", position=(0, 0, 0))
+        bad_root = outsider_scene.assembly("root", children=(member,))
+        outsider_scene.asset(root=bad_root, origin="outsider.origin")
+        with self.assertRaises(ConstraintConflictError):
+            outsider_scene.resolve()
+
     def test_conflicting_authored_and_derived_center_is_rejected(self):
         scene = spatial.Scene("conflict")
         a = scene.box("A", size=(2, 2, 2), center=(0, 0, 0))

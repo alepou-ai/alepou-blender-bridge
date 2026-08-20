@@ -72,6 +72,15 @@ def _axis(value: str, path: str) -> str:
     return normalized
 
 
+def _signed_axis(value: str, path: str) -> str:
+    candidate = str(value).strip().upper()
+    sign = "-" if candidate.startswith("-") else ""
+    principal = candidate.removeprefix("+").removeprefix("-")
+    if principal not in AXES:
+        raise InvalidParameterError(f"Expected a signed X, Y or Z axis, got {value!r}", path=path)
+    return sign + principal
+
+
 def _ref(value: str | Any) -> str:
     candidate = getattr(value, "id", value)
     if not isinstance(candidate, str) or not candidate.strip():
@@ -402,6 +411,28 @@ class Assembly:
 
 
 @dataclass(frozen=True)
+class AssetConstitution:
+    root: str
+    origin: str
+    center_axes: tuple[str, ...]
+    ground_axis: str | None
+    up: str
+    forward: str
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "root": self.root,
+            "origin": self.origin,
+            "centerAxes": list(self.center_axes),
+            "up": self.up,
+            "forward": self.forward,
+        }
+        if self.ground_axis is not None:
+            result["groundAxis"] = self.ground_axis
+        return result
+
+
+@dataclass(frozen=True)
 class Relation:
     id: str
     subject: str
@@ -445,6 +476,7 @@ class Scene:
         self.arrays: dict[str, Entity] = {}
         self.assemblies: dict[str, Assembly] = {}
         self.relations: list[Relation] = []
+        self.asset_constitution: AssetConstitution | None = None
         self._ids: set[str] = set()
 
     @staticmethod
@@ -645,6 +677,40 @@ class Scene:
         self.assemblies[id] = value
         return value
 
+    def asset(
+        self,
+        *,
+        root: str | Assembly,
+        origin: str,
+        center_axes: Iterable[str] | None = None,
+        ground_axis: str | None = "Z",
+        up: str = "Z",
+        forward: str = "-Y",
+    ) -> AssetConstitution:
+        if self.asset_constitution is not None:
+            raise DuplicateIdError("A Spatial scene can declare only one asset constitution", path="asset")
+        normalized_ground = _axis(ground_axis, "asset.groundAxis") if ground_axis is not None else None
+        normalized_center = tuple(
+            _axis(item, f"asset.centerAxes[{index}]")
+            for index, item in enumerate(center_axes if center_axes is not None else tuple(axis for axis in ("X", "Y", "Z") if axis != normalized_ground))
+        )
+        if len(set(normalized_center)) != len(normalized_center):
+            raise InvalidParameterError("Asset center axes must be unique", path="asset.centerAxes")
+        if normalized_ground in normalized_center:
+            raise InvalidParameterError("The ground axis cannot also be a center axis", path="asset.centerAxes")
+        normalized_up = _signed_axis(up, "asset.up")
+        normalized_forward = _signed_axis(forward, "asset.forward")
+        if normalized_ground is not None and normalized_up.removeprefix("-") != normalized_ground:
+            raise InvalidParameterError("Asset up and ground axes must use the same principal axis", path="asset.up")
+        if normalized_forward.removeprefix("-") == normalized_up.removeprefix("-"):
+            raise InvalidParameterError("Asset forward cannot be parallel to up", path="asset.forward")
+        selector = str(origin or "").strip()
+        if selector.count(".") != 1 or not all(ID_PATTERN.fullmatch(part) for part in selector.split(".")):
+            raise InvalidParameterError("Asset origin must be an entity.anchor selector", path="asset.origin")
+        value = AssetConstitution(_ref(root), selector, normalized_center, normalized_ground, normalized_up, normalized_forward)
+        self.asset_constitution = value
+        return value
+
     def relate(
         self,
         subject: Any,
@@ -686,6 +752,8 @@ class Scene:
         }
         if self.metadata:
             result["scene"]["metadata"] = _clean(self.metadata)
+        if self.asset_constitution is not None:
+            result["asset"] = self.asset_constitution.to_dict()
         if self.frames:
             result["frames"] = {key: value.to_dict() for key, value in sorted(self.frames.items())}
         if self.axes:
@@ -774,6 +842,18 @@ class Scene:
                 raise InvalidParameterError(f"Unsupported array type {kind!r}", path=f"arrays.{entity_id}.type")
         for entity_id, raw in (value.get("assemblies") or {}).items():
             scene.assembly(entity_id, frame=raw.get("frame", "world"), children=raw.get("children", ()), metadata=raw.get("metadata"))
+        asset = value.get("asset")
+        if asset is not None:
+            if not isinstance(asset, Mapping):
+                raise SchemaError("asset must be a mapping", path="asset")
+            scene.asset(
+                root=asset.get("root"),
+                origin=asset.get("origin"),
+                center_axes=asset.get("centerAxes"),
+                ground_axis=asset.get("groundAxis", "Z"),
+                up=asset.get("up", "Z"),
+                forward=asset.get("forward", "-Y"),
+            )
         for raw in value.get("relations") or []:
             scene.relate(raw.get("subject"), raw.get("relation"), raw.get("object"), axis=raw.get("axis"), axes=raw.get("axes"), gap=raw.get("gap", 0), id=raw.get("id"))
         scene.validate()
@@ -799,6 +879,7 @@ class Scene:
 __all__ = [
     "Anchor",
     "Assembly",
+    "AssetConstitution",
     "Axis",
     "Bevel",
     "BoxSpec",

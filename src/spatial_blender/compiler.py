@@ -54,6 +54,7 @@ from mathutils import Matrix
 
 PLAN = json.loads(__SPATIAL_PLAN_JSON__)
 SCENE_ID = PLAN["sceneId"]
+ASSET = PLAN.get("asset")
 SOURCE_HASH = PLAN["sourceHash"]
 RUNTIME_VERSION = PLAN["runtimeVersion"]
 BACKEND_VERSION = PLAN["backendVersion"]
@@ -384,6 +385,15 @@ bpy.context.scene["spatial.scene_id"] = SCENE_ID
 bpy.context.scene["spatial.source_hash"] = SOURCE_HASH
 bpy.context.scene["spatial.runtime_version"] = RUNTIME_VERSION
 bpy.context.scene["spatial.backend_version"] = BACKEND_VERSION
+if ASSET is None:
+    bpy.context.scene.pop("spatial.asset", None)
+else:
+    bpy.context.scene["spatial.asset"] = json.dumps(ASSET, sort_keys=True, separators=(",", ":"))
+for entity_id, obj in EXISTING.items():
+    if entity_id in DESIRED:
+        obj.pop("spatial.asset_root", None)
+if ASSET is not None:
+    EXISTING[ASSET["root"]]["spatial.asset_root"] = True
 bpy.context.view_layer.update()
 print("SPATIAL_RESULT_JSON=" + json.dumps(RESULT, sort_keys=True, separators=(",", ":")))
 '''

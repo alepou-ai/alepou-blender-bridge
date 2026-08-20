@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections import Counter
 from typing import Any, Iterable
@@ -110,6 +111,13 @@ def scene_summary(max_types: int = 50) -> dict[str, Any]:
     objects = list(scene.objects)
     type_counts = Counter(obj.type for obj in objects)
     active = bpy.context.view_layer.objects.active
+    spatial_asset = None
+    raw_spatial_asset = scene.get("spatial.asset")
+    if raw_spatial_asset:
+        try:
+            spatial_asset = json.loads(str(raw_spatial_asset))
+        except (TypeError, ValueError):
+            spatial_asset = {"error": "invalid spatial.asset JSON"}
     return {
         "scene": scene.name,
         "viewLayer": bpy.context.view_layer.name,
@@ -126,6 +134,7 @@ def scene_summary(max_types: int = 50) -> dict[str, Any]:
         "selectedCount": len(bpy.context.selected_objects),
         "activeObject": active.name_full if active else None,
         "activeMode": active.mode if active else "OBJECT",
+        "spatialAsset": spatial_asset,
         "render": {
             "engine": scene.render.engine,
             "resolution": [scene.render.resolution_x, scene.render.resolution_y, scene.render.resolution_percentage],

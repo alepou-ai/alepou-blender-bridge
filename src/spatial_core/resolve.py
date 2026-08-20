@@ -156,6 +156,7 @@ class ResolvedScene:
     entities: dict[str, ResolvedEntity]
     relations: list[Relation]
     derivations: dict[str, Derivation]
+    asset: dict[str, Any] | None = None
 
     @property
     def unit_scale_meters(self) -> float:
@@ -170,6 +171,8 @@ class ResolvedScene:
         result = entity.to_dict()
         result["relations"] = relation_ids
         result["units"] = self.units
+        if self.asset is not None and self.asset["root"] == entity_id:
+            result["assetConstitution"] = _jsonable(self.asset)
         return result
 
     def why(self, selector: str) -> dict[str, Any]:
@@ -186,12 +189,15 @@ class ResolvedScene:
         return derivation.to_dict()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "spatial": "0.1",
             "scene": {"id": self.id, "units": self.units, "sourceHash": self.source_hash},
             "entities": {key: value.to_dict() for key, value in sorted(self.entities.items())},
             "derivations": {key: value.to_dict() for key, value in sorted(self.derivations.items())},
         }
+        if self.asset is not None:
+            result["asset"] = _jsonable(self.asset)
+        return result
 
 
 def _jsonable(value: Any) -> Any:
@@ -241,6 +247,7 @@ def validate_scene(scene: Scene) -> None:
             if child not in addressable - set(scene.axes):
                 raise UnknownReferenceError(f"Assembly {assembly.id!r} has unknown child {child!r}", path=f"assemblies.{assembly.id}.children")
     _validate_assembly_cycles(scene)
+    _validate_asset_constitution(scene)
     relation_ids: set[str] = set()
     for relation in scene.relations:
         if relation.id in relation_ids:
@@ -265,6 +272,40 @@ def validate_scene(scene: Scene) -> None:
                     "after/before currently require axis-aligned entities in their shared frame",
                     relation_id=relation.id,
                 )
+
+
+def _assembly_descendants(scene: Scene, root: str) -> set[str]:
+    result: set[str] = set()
+
+    def visit(assembly_id: str) -> None:
+        for child in scene.assemblies[assembly_id].children:
+            result.add(child)
+            if child in scene.assemblies:
+                visit(child)
+
+    visit(root)
+    return result
+
+
+def _validate_asset_constitution(scene: Scene) -> None:
+    asset = scene.asset_constitution
+    if asset is None:
+        return
+    if asset.root not in scene.assemblies:
+        raise UnknownReferenceError("Asset root must be an assembly", path="asset.root", entity_id=asset.root)
+    entity_id, anchor_name = asset.origin.split(".", 1)
+    nodes = _all_nodes(scene)
+    entity = nodes.get(entity_id)
+    if entity is None:
+        raise UnknownReferenceError(f"Asset origin entity {entity_id!r} is unknown", path="asset.origin", entity_id=entity_id)
+    if anchor_name not in entity.anchors:
+        raise UnknownReferenceError(f"Asset origin anchor {asset.origin!r} is unknown", path="asset.origin", entity_id=entity_id)
+    if entity_id not in _assembly_descendants(scene, asset.root):
+        raise ConstraintConflictError(
+            f"Asset origin {asset.origin!r} is not contained by root assembly {asset.root!r}",
+            path="asset.origin",
+            entity_id=entity_id,
+        )
 
 
 def _validate_frame_cycles(scene: Scene) -> None:
@@ -513,6 +554,112 @@ def _world_bounds(center: Vec3, half: Vec3, rotation: Matrix3) -> Bounds:
     return Bounds.from_center_half(center, world_half)  # type: ignore[arg-type]
 
 
+def _signed_axis_vector(axis: str) -> Vec3:
+    sign = -1.0 if axis.startswith("-") else 1.0
+    result = [0.0, 0.0, 0.0]
+    result[AXIS_INDEX[axis.removeprefix("-")]] = sign
+    return tuple(result)  # type: ignore[return-value]
+
+
+def _close_vector(first: Vec3, second: Vec3) -> bool:
+    return all(abs(first[index] - second[index]) <= TOLERANCE for index in range(3))
+
+
+def _translated_bounds(bounds: Bounds, translation: Vec3) -> Bounds:
+    return Bounds(_add(bounds.minimum, translation), _add(bounds.maximum, translation))
+
+
+def _resolve_asset_constitution(
+    scene: Scene,
+    entities: dict[str, ResolvedEntity],
+    derivations: dict[str, Derivation],
+) -> dict[str, Any] | None:
+    asset = scene.asset_constitution
+    if asset is None:
+        return None
+    origin_entity_id, anchor_name = asset.origin.split(".", 1)
+    origin_entity = entities[origin_entity_id]
+    anchor = origin_entity.anchors[anchor_name]
+    anchor_position = tuple(float(value) for value in anchor["position"])
+    origin_before = _add(origin_entity.world_center, _matvec(origin_entity.world_rotation, anchor_position))
+
+    expected_up = _signed_axis_vector(asset.up)
+    expected_forward = _signed_axis_vector(asset.forward)
+    if anchor.get("up") is not None:
+        actual_up = _matvec(origin_entity.world_rotation, tuple(float(value) for value in anchor["up"]))
+        if not _close_vector(actual_up, expected_up):
+            raise ConstraintConflictError(
+                f"Asset origin anchor up {actual_up!r} does not match declared {asset.up}",
+                path="asset.up",
+                entity_id=origin_entity_id,
+            )
+    if anchor.get("direction") is not None:
+        actual_forward = _matvec(origin_entity.world_rotation, tuple(float(value) for value in anchor["direction"]))
+        if not _close_vector(actual_forward, expected_forward):
+            raise ConstraintConflictError(
+                f"Asset origin anchor direction {actual_forward!r} does not match declared {asset.forward}",
+                path="asset.forward",
+                entity_id=origin_entity_id,
+            )
+
+    correction = [0.0, 0.0, 0.0]
+    for axis in asset.center_axes:
+        index = AXIS_INDEX[axis]
+        correction[index] = -origin_before[index]
+    root_bounds_before = entities[asset.root].bounds
+    if asset.ground_axis is not None:
+        index = AXIS_INDEX[asset.ground_axis]
+        ground_coordinate = root_bounds_before.maximum[index] if asset.up.startswith("-") else root_bounds_before.minimum[index]
+        correction[index] = -ground_coordinate
+    translation: Vec3 = tuple(correction)  # type: ignore[assignment]
+
+    subtree: set[str] = set()
+
+    def collect(entity_id: str) -> None:
+        if entity_id in subtree:
+            return
+        subtree.add(entity_id)
+        for child_id in entities[entity_id].children:
+            collect(child_id)
+
+    collect(asset.root)
+    for entity_id in subtree:
+        entity = entities[entity_id]
+        entity.bounds = _translated_bounds(entity.bounds, translation)
+        entity.world_center = (0.0, 0.0, 0.0) if entity_id == asset.root else _add(entity.world_center, translation)
+
+    origin_after = _add(origin_before, translation)
+    root_bounds_after = entities[asset.root].bounds
+    for axis in asset.center_axes:
+        index = AXIS_INDEX[axis]
+        if abs(origin_after[index]) > TOLERANCE:
+            raise ConstraintConflictError("Asset origin did not resolve onto a declared center axis", path="asset.centerAxes")
+        derivations[f"{asset.root}.asset_origin.{axis.lower()}"] = Derivation(
+            asset.root,
+            f"asset_origin.{axis.lower()}",
+            origin_after[index],
+            "asset_constitution",
+            f"center {asset.origin} on world {axis}=0",
+            (f"{origin_entity_id}.anchors.{anchor_name}.position.{axis.lower()}",),
+        )
+    grounded = None
+    if asset.ground_axis is not None:
+        index = AXIS_INDEX[asset.ground_axis]
+        grounded = root_bounds_after.maximum[index] if asset.up.startswith("-") else root_bounds_after.minimum[index]
+        if abs(grounded) > TOLERANCE:
+            raise ConstraintConflictError("Asset root did not resolve onto its ground plane", path="asset.groundAxis")
+
+    return {
+        **asset.to_dict(),
+        "translation": list(translation),
+        "originWorldBefore": list(origin_before),
+        "originWorld": list(origin_after),
+        "rootBounds": root_bounds_after.to_dict(),
+        "groundedCoordinate": grounded,
+        "units": scene.units,
+    }
+
+
 def _resolved_primitive(entity: Entity, local_center: Vec3, frame: _FrameTransform) -> ResolvedEntity:
     world_center = _add(frame.origin, _matvec(frame.rotation, local_center))
     world_rotation = _matmul(frame.rotation, _rotation(entity.rotation))
@@ -666,7 +813,8 @@ def resolve_scene(scene: Scene) -> ResolvedScene:
         if array.id in parent_for:
             entities[array.id].parent = parent_for[array.id]
 
-    return ResolvedScene(scene.id, scene.units, scene.source_hash(), entities, list(scene.relations), derivations)
+    asset = _resolve_asset_constitution(scene, entities, derivations)
+    return ResolvedScene(scene.id, scene.units, scene.source_hash(), entities, list(scene.relations), derivations, asset)
 
 
 __all__ = ["Bounds", "Derivation", "ResolvedEntity", "ResolvedScene", "resolve_scene", "validate_scene"]

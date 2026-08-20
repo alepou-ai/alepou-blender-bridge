@@ -77,9 +77,24 @@ class SpatialBlenderTests(unittest.TestCase):
         self.assertIn('vertices=params["segments"]', compiled.source)
         self.assertIn("def _apply_shading(mesh, kind, params):", compiled.source)
 
+    def test_asset_constitution_is_scaled_and_stamped_for_blender(self):
+        scene = spatial.Scene("asset", units="mm")
+        base = scene.cylinder("base", radius=100, length=20, center=(250, 0, 10))
+        base.anchor("origin", position=(0, 0, -10), direction=(1, 0, 0), up=(0, 0, 1))
+        root = scene.assembly("root", children=(base,))
+        scene.asset(root=root, origin="base.origin", center_axes=("X", "Y"), forward="X")
+        compiled = compile_script(build_compile_plan(scene.resolve(), mode="update"))
+        self.assertEqual(compiled.plan.asset["translation"], [-0.25, -0.0, -0.0])
+        self.assertEqual(compiled.plan.asset["originWorld"], [0.0, 0.0, 0.0])
+        self.assertEqual(compiled.plan.asset["sourceUnits"], "mm")
+        self.assertEqual(compiled.plan.asset["units"], "m")
+        self.assertIn('bpy.context.scene["spatial.asset"]', compiled.source)
+        self.assertIn('EXISTING[ASSET["root"]]["spatial.asset_root"] = True', compiled.source)
+
     def test_state_export_prefers_canonical_spatial_identity_with_legacy_fallback(self):
         source = STATE_PATH.read_text(encoding="utf-8")
         self.assertIn('obj.get("spatial.entity_id") or obj.get("spatial_id")', source)
+        self.assertIn('"spatialAsset": spatial_asset', source)
 
     def test_project_mode_enforces_off_opt_in_and_required(self):
         raw = {"actions": [{"action": "script.execute", "source": "import bpy"}]}

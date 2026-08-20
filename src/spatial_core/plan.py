@@ -57,13 +57,14 @@ class CompilePlan:
     mode: str
     force: bool
     operations: tuple[CompileOperation, ...]
+    asset: Mapping[str, Any] | None = None
     runtime_version: str = "0.1.0"
     backend: str = "blender"
     backend_version: str = "0.1.0"
     fallback_allowed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schemaVersion": 1,
             "sceneId": self.scene_id,
             "sourceHash": self.source_hash,
@@ -77,6 +78,9 @@ class CompilePlan:
             "fallbackAllowed": self.fallback_allowed,
             "operations": [operation.to_dict() for operation in self.operations],
         }
+        if self.asset is not None:
+            result["asset"] = dict(self.asset)
+        return result
 
     def summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -137,6 +141,25 @@ def _desired(entity: ResolvedEntity, resolved: ResolvedScene) -> dict[str, Any]:
     return desired
 
 
+def _scaled_asset(resolved: ResolvedScene) -> dict[str, Any] | None:
+    if resolved.asset is None:
+        return None
+    scale = resolved.unit_scale_meters
+    value = dict(resolved.asset)
+    for key in ("translation", "originWorldBefore", "originWorld"):
+        value[key] = [coordinate * scale for coordinate in value[key]]
+    bounds = value["rootBounds"]
+    value["rootBounds"] = {
+        "min": [coordinate * scale for coordinate in bounds["min"]],
+        "max": [coordinate * scale for coordinate in bounds["max"]],
+    }
+    if value.get("groundedCoordinate") is not None:
+        value["groundedCoordinate"] = value["groundedCoordinate"] * scale
+    value["sourceUnits"] = resolved.units
+    value["units"] = "m"
+    return value
+
+
 def build_compile_plan(
     resolved: ResolvedScene,
     *,
@@ -185,13 +208,14 @@ def build_compile_plan(
                 operations.append(CompileOperation("delete", entity_id, "managed", previous_fingerprint=prior.fingerprint))
 
     return CompilePlan(
-        resolved.id,
-        resolved.source_hash,
-        resolved.units,
-        resolved.unit_scale_meters,
-        normalized_mode,
-        bool(force),
-        tuple(operations),
+        scene_id=resolved.id,
+        source_hash=resolved.source_hash,
+        units=resolved.units,
+        unit_scale_meters=resolved.unit_scale_meters,
+        mode=normalized_mode,
+        force=bool(force),
+        operations=tuple(operations),
+        asset=_scaled_asset(resolved),
     )
 
 

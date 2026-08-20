@@ -3,6 +3,7 @@
 from spatial_core import (
     Anchor,
     Assembly,
+    AssetConstitution,
     Axis,
     AuthoringPolicy,
     Bevel,
