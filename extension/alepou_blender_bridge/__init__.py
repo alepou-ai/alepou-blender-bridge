@@ -137,7 +137,7 @@ class ALEPOU_OT_SetSpatialMode(bpy.types.Operator):
 
     def execute(self, _context: object) -> set[str]:
         bridge = service.get_service()
-        root = bridge.root()
+        root = bridge.policy_root()
         if root is None:
             self.report({"ERROR"}, "Bind an existing Alepou project root first")
             return {"CANCELLED"}
@@ -152,7 +152,7 @@ class ALEPOU_OT_SetSpatialMode(bpy.types.Operator):
 
 
 def _draw_spatial_controls(layout: object, bridge: object) -> None:
-    root = bridge.root()
+    root = bridge.policy_root()
     try:
         mode = spatial_policy.read_mode(root) if root else "off"
     except spatial_policy.SpatialPolicyError:
@@ -177,6 +177,7 @@ class ALEPOU_PT_Bridge(bpy.types.Panel):
         bridge = service.get_service()
         layout.label(text=f"Authority: {preferences.trust_mode.replace('_', ' ').title()}")
         layout.label(text=f"Project: {preferences.project_root or '(not bound)'}")
+        layout.label(text=f"Instance: {bridge.instance_id}")
         layout.prop(preferences, "processor_enabled", text="Processing")
         _draw_spatial_controls(layout, bridge)
         layout.operator("alepou.bridge_export_state", icon="FILE_REFRESH")

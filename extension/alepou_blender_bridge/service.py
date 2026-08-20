@@ -45,6 +45,7 @@ MUTATION_ACTIONS = {
     "camera.ensure_standard",
 }
 SUPPORTED_ACTIONS = OBSERVATION_ACTIONS | MUTATION_ACTIONS
+LEGACY_OWNER_STALE_SECONDS = 5.0
 
 
 class RejectedRequest(RuntimeError):
@@ -80,6 +81,8 @@ def _truthy(value: Any, default: bool = False) -> bool:
 
 class BridgeService:
     def __init__(self) -> None:
+        requested_instance_id = os.environ.get("ALEPOU_BLENDER_INSTANCE_ID")
+        self.instance_id = protocol.validate_instance_id(requested_instance_id or f"blender-{uuid.uuid4().hex[:12]}")
         self.generation = uuid.uuid4().hex
         self.started_at = protocol.utc_now()
         self.last_export_monotonic = 0.0
@@ -91,6 +94,7 @@ class BridgeService:
         self.blocked_reason: str | None = None
         self.last_error: str | None = None
         self._known_project: Path | None = None
+        self._legacy_owner = False
         self._started = False
         self.session_trust_mode = "observation"
         self.session_id: str | None = None
@@ -106,9 +110,111 @@ class BridgeService:
             self.blocked_reason = str(error)
             return None
 
-    def root(self) -> Path | None:
+    def base_root(self) -> Path | None:
         project = self.project_root()
         return protocol.bridge_root(project) if project else None
+
+    def root(self) -> Path | None:
+        base = self.base_root()
+        return protocol.instance_root(base, self.instance_id) if base else None
+
+    def policy_root(self) -> Path | None:
+        return self.base_root()
+
+    def _publication_roots(self) -> list[Path]:
+        instance = self.root()
+        base = self.base_root()
+        result = [instance] if instance else []
+        if self._legacy_owner and base is not None:
+            result.append(base)
+        return result
+
+    def _queue_roots(self) -> list[tuple[Path, bool]]:
+        instance = self.root()
+        base = self.base_root()
+        result = [(instance, True)] if instance else []
+        if self._legacy_owner and base is not None:
+            result.append((base, False))
+        return result
+
+    def _read_legacy_owner(self, base: Path) -> dict[str, Any] | None:
+        path = base / "legacy-owner.json"
+        try:
+            value = protocol.read_json(path)
+            return value if isinstance(value, dict) else None
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+
+    def _legacy_owner_age(self, value: dict[str, Any] | None) -> float:
+        if value is None:
+            return float("inf")
+        try:
+            return max(0.0, time.time() - float(value.get("heartbeatUnix", 0)))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    def _acquire_legacy_lock(self, base: Path) -> Path | None:
+        lock = base / ".legacy-owner.lock"
+        for _attempt in range(2):
+            try:
+                lock.mkdir()
+                return lock
+            except FileExistsError:
+                try:
+                    age = max(0.0, time.time() - lock.stat().st_mtime)
+                    if age > LEGACY_OWNER_STALE_SECONDS:
+                        lock.rmdir()
+                        continue
+                except (FileNotFoundError, OSError):
+                    continue
+                return None
+        return None
+
+    def _refresh_legacy_owner(self, base: Path) -> bool:
+        lock = self._acquire_legacy_lock(base)
+        if lock is None:
+            current = self._read_legacy_owner(base)
+            return bool(
+                current
+                and current.get("instanceId") == self.instance_id
+                and self._legacy_owner_age(current) <= LEGACY_OWNER_STALE_SECONDS
+            )
+        try:
+            current = self._read_legacy_owner(base)
+            current_age = self._legacy_owner_age(current)
+            if current and current.get("instanceId") != self.instance_id and current_age <= LEGACY_OWNER_STALE_SECONDS:
+                return False
+            protocol.atomic_write_json(
+                base / "legacy-owner.json",
+                {
+                    "schemaVersion": 1,
+                    "instanceId": self.instance_id,
+                    "executorGeneration": self.generation,
+                    "heartbeatAt": protocol.utc_now(),
+                    "heartbeatUnix": time.time(),
+                    "instanceRoot": str(self.root().resolve()) if self.root() else None,
+                },
+            )
+            return True
+        finally:
+            try:
+                lock.rmdir()
+            except OSError:
+                pass
+
+    def _release_legacy_owner(self, base: Path) -> None:
+        lock = self._acquire_legacy_lock(base)
+        if lock is None:
+            return
+        try:
+            current = self._read_legacy_owner(base)
+            if current and current.get("instanceId") == self.instance_id:
+                (base / "legacy-owner.json").unlink(missing_ok=True)
+        finally:
+            try:
+                lock.rmdir()
+            except OSError:
+                pass
 
     def processor_enabled(self) -> bool:
         return _truthy(_setting("processor_enabled", "ALEPOU_BLENDER_PROCESSOR_ENABLED", True), True)
@@ -141,15 +247,23 @@ class BridgeService:
 
     def start(self) -> None:
         self._started = True
+        base = self.base_root()
         root = self.root()
-        if root:
+        if root and base:
+            protocol.ensure_project_layout(base)
             protocol.ensure_layout(root)
             if self._known_project != self.project_root():
+                if self._known_project is not None and self._legacy_owner:
+                    self._release_legacy_owner(protocol.bridge_root(self._known_project))
+                    self._legacy_owner = False
                 self._known_project = self.project_root()
                 self.generation = uuid.uuid4().hex
                 self.started_at = protocol.utc_now()
                 self.state_revision = 0
                 self._interrupt_processing(root)
+            self._legacy_owner = self._refresh_legacy_owner(base)
+            if self._legacy_owner:
+                self._interrupt_processing(base)
             self.export_capabilities(root)
             self.export_state(root, reason="service_start")
             self.write_health(root)
@@ -157,22 +271,30 @@ class BridgeService:
     def stop(self, reason: str = "stopped") -> None:
         self._started = False
         self.blocked_reason = reason
+        base = self.base_root()
         root = self.root()
         if root:
-            self._reject_pending(root, reason)
+            for queue_root, _require_target in self._queue_roots():
+                self._reject_pending(queue_root, reason)
             self.write_health(root, forced_active=False)
+        if base and self._legacy_owner:
+            self._release_legacy_owner(base)
+            self._legacy_owner = False
 
     def mark_dirty(self, _reason: str = "scene_changed") -> None:
         self.dirty = True
 
     def tick(self) -> float:
         try:
+            base = self.base_root()
             root = self.root()
-            if root is None:
+            if root is None or base is None:
                 return 1.0
+            protocol.ensure_project_layout(base)
             protocol.ensure_layout(root)
             if self._known_project != self.project_root():
                 self.start()
+            self._legacy_owner = self._refresh_legacy_owner(base)
             if not self.processor_enabled():
                 self.blocked_reason = "processor_stopped"
                 self.write_health(root, forced_active=False)
@@ -181,8 +303,9 @@ class BridgeService:
             now = time.monotonic()
             if self.dirty or now - self.last_export_monotonic >= 2.0:
                 self.export_state(root, reason="dirty" if self.dirty else "periodic")
-            self._process_next(root, query=True)
-            self._process_next(root, query=False)
+            for queue_root, require_target in self._queue_roots():
+                self._process_next(queue_root, query=True, require_target=require_target)
+                self._process_next(queue_root, query=False, require_target=require_target)
             if now - self.last_heartbeat_monotonic >= 0.45:
                 self.write_health(root)
             return 0.25
@@ -195,39 +318,60 @@ class BridgeService:
             return 1.0
 
     def export_capabilities(self, root: Path) -> None:
-        protocol.atomic_write_json(
-            root / "capabilities.json",
-            {
-                "schemaVersion": protocol.SCHEMA_VERSION,
-                "bridgeVersion": protocol.BRIDGE_VERSION,
-                "transport": "local-filesystem",
-                "mainThreadExecution": True,
-                "actions": sorted(SUPPORTED_ACTIONS),
-                "observationActions": sorted(OBSERVATION_ACTIONS),
-                "mutationActions": sorted(MUTATION_ACTIONS),
-                "diagnosticViews": sorted(capture.VIEW_DIRECTIONS),
-                "diagnosticModes": ["beauty", "clay", "silhouette", "wireframe"],
-                "spatialAuthoring": {**spatial_policy.describe(root), **spatial_runtime.describe()},
-                "limits": {"objectsSummary": 500, "jsonRequestBytes": protocol.DEFAULT_MAX_JSON_BYTES},
+        policy_root = self.policy_root() or root
+        value = {
+            "schemaVersion": protocol.SCHEMA_VERSION,
+            "bridgeVersion": protocol.BRIDGE_VERSION,
+            "transport": "local-filesystem",
+            "instanceRouting": {
+                "instanceId": self.instance_id,
+                "targetRequiredInInstanceQueue": True,
+                "legacyQueueOwner": self._legacy_owner,
             },
-        )
+            "mainThreadExecution": True,
+            "actions": sorted(SUPPORTED_ACTIONS),
+            "observationActions": sorted(OBSERVATION_ACTIONS),
+            "mutationActions": sorted(MUTATION_ACTIONS),
+            "diagnosticViews": sorted(capture.VIEW_DIRECTIONS),
+            "diagnosticModes": ["beauty", "clay", "silhouette", "wireframe"],
+            "spatialAuthoring": {**spatial_policy.describe(policy_root), **spatial_runtime.describe()},
+            "limits": {"objectsSummary": 500, "jsonRequestBytes": protocol.DEFAULT_MAX_JSON_BYTES},
+        }
+        for publication_root in self._publication_roots() or [root]:
+            protocol.atomic_write_json(publication_root / "capabilities.json", value)
 
     def export_state(self, root: Path, reason: str) -> dict[str, Any]:
         self.state_revision += 1
         exported_at = protocol.utc_now()
         summary = state.scene_summary()
-        summary.update({"schemaVersion": 1, "exportedAt": exported_at, "stateRevision": self.state_revision, "reason": reason})
-        protocol.atomic_write_json(root / "scene-summary.json", summary)
-        protocol.atomic_write_json(root / "selection.json", {**state.selection_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision})
-        protocol.atomic_write_json(root / "state" / "objects-summary.json", {**state.objects_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision})
-        protocol.atomic_write_json(root / "state" / "collections-summary.json", {**state.collections_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision})
-        protocol.atomic_write_json(
-            root / "state" / "recent-changes.json",
-            {"exportedAt": exported_at, "stateRevision": self.state_revision, "reason": reason, "note": "Dependency graph marked state dirty; this bounded vertical slice does not claim a complete object-level diff."},
+        summary.update(
+            {
+                "schemaVersion": 1,
+                "instanceId": self.instance_id,
+                "executorGeneration": self.generation,
+                "exportedAt": exported_at,
+                "stateRevision": self.state_revision,
+                "reason": reason,
+            }
         )
+        selection = {**state.selection_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision}
+        objects = {**state.objects_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision}
+        collections = {**state.collections_summary(), "exportedAt": exported_at, "stateRevision": self.state_revision}
+        changes = {
+            "exportedAt": exported_at,
+            "stateRevision": self.state_revision,
+            "reason": reason,
+            "note": "Dependency graph marked state dirty; this bounded vertical slice does not claim a complete object-level diff.",
+        }
         diagnostics = self._diagnostics()
-        protocol.atomic_write_json(root / "diagnostics.json", diagnostics)
-        protocol.atomic_write_text(root / "status.md", self._status_markdown(summary, diagnostics))
+        for publication_root in self._publication_roots() or [root]:
+            protocol.atomic_write_json(publication_root / "scene-summary.json", summary)
+            protocol.atomic_write_json(publication_root / "selection.json", selection)
+            protocol.atomic_write_json(publication_root / "state" / "objects-summary.json", objects)
+            protocol.atomic_write_json(publication_root / "state" / "collections-summary.json", collections)
+            protocol.atomic_write_json(publication_root / "state" / "recent-changes.json", changes)
+            protocol.atomic_write_json(publication_root / "diagnostics.json", diagnostics)
+            protocol.atomic_write_text(publication_root / "status.md", self._status_markdown(summary, diagnostics))
         self.last_export_monotonic = time.monotonic()
         self.last_export_at = exported_at
         self.dirty = False
@@ -255,6 +399,7 @@ class BridgeService:
                 "",
                 f"- Bridge: {protocol.BRIDGE_VERSION}",
                 f"- Blender: {bpy.app.version_string}",
+                f"- Instance: {self.instance_id}",
                 f"- Scene: {summary['scene']}",
                 f"- Blend file: {summary['blendFile'] or '(unsaved)'}",
                 f"- Objects: {summary['objectCount']}",
@@ -268,37 +413,45 @@ class BridgeService:
 
     def write_health(self, root: Path, forced_active: bool | None = None) -> None:
         active = self.processor_enabled() and self._started if forced_active is None else forced_active
-        command_counts = {}
-        for status in ("pending", "processing", "applied", "failed", "rejected", "interrupted"):
-            command_counts[status] = len(list((root / "commands" / status).glob("*.json")))
         active_obj = bpy.context.view_layer.objects.active if bpy.context.view_layer else None
-        health = {
-            "schemaVersion": 1,
-            "bridgeVersion": protocol.BRIDGE_VERSION,
-            "blenderVersion": bpy.app.version_string,
-            "processorActive": active,
-            "heartbeatAt": protocol.utc_now(),
-            "executorGeneration": self.generation,
-            "startedAt": self.started_at,
-            "projectRoot": str(self.project_root()) if self.project_root() else None,
-            "bridgeRoot": str(root.resolve()),
-            "blendFile": bpy.data.filepath or None,
-            "unsavedBlend": not bool(bpy.data.filepath),
-            "background": bool(bpy.app.background),
-            "activeObjectMode": active_obj.mode if active_obj else "OBJECT",
-            "rendering": bool(bpy.app.is_job_running("RENDER")) if hasattr(bpy.app, "is_job_running") else False,
-            "activeCommand": self.active_command,
-            "commandCounts": command_counts,
-            "stateRevision": self.state_revision,
-            "lastExportAt": self.last_export_at,
-            "trustMode": self.trust_mode(),
-            "spatialMode": spatial_policy.read_mode(root),
-            "owningSession": self.owning_session(),
-            "recoverySnapshotStatus": "available" if any((root / "recovery").glob("*.blend")) else "none",
-            "blockedReason": self.blocked_reason,
-            "degradedReason": self.last_error,
-        }
-        protocol.atomic_write_json(root / "bridge-health.json", health)
+        heartbeat_at = protocol.utc_now()
+        policy_root = self.policy_root() or root
+        for publication_root in self._publication_roots() or [root]:
+            command_counts = {}
+            for status in ("pending", "processing", "applied", "failed", "rejected", "interrupted"):
+                command_counts[status] = len(list((publication_root / "commands" / status).glob("*.json")))
+            health = {
+                "schemaVersion": 1,
+                "bridgeVersion": protocol.BRIDGE_VERSION,
+                "blenderVersion": bpy.app.version_string,
+                "instanceId": self.instance_id,
+                "instanceRoot": str(self.root().resolve()) if self.root() else None,
+                "legacyQueueOwner": self._legacy_owner,
+                "processorActive": active,
+                "heartbeatAt": heartbeat_at,
+                "executorGeneration": self.generation,
+                "startedAt": self.started_at,
+                "projectRoot": str(self.project_root()) if self.project_root() else None,
+                "bridgeRoot": str(publication_root.resolve()),
+                "blendFile": bpy.data.filepath or None,
+                "unsavedBlend": not bool(bpy.data.filepath),
+                "background": bool(bpy.app.background),
+                "activeObjectMode": active_obj.mode if active_obj else "OBJECT",
+                "rendering": bool(bpy.app.is_job_running("RENDER")) if hasattr(bpy.app, "is_job_running") else False,
+                "activeCommand": self.active_command,
+                "commandCounts": command_counts,
+                "stateRevision": self.state_revision,
+                "lastExportAt": self.last_export_at,
+                "trustMode": self.trust_mode(),
+                "spatialMode": spatial_policy.read_mode(policy_root),
+                "owningSession": self.owning_session(),
+                "recoverySnapshotStatus": "available" if any((publication_root / "recovery").glob("*.blend")) else "none",
+                "blockedReason": self.blocked_reason,
+                "degradedReason": self.last_error,
+            }
+            protocol.atomic_write_json(publication_root / "bridge-health.json", health)
+            if publication_root == self.root():
+                protocol.atomic_write_json(publication_root / "instance.json", health)
         self.last_heartbeat_monotonic = time.monotonic()
 
     def _interrupt_processing(self, root: Path) -> None:
@@ -316,6 +469,7 @@ class BridgeService:
                 "status": "interrupted",
                 "finishedAt": protocol.utc_now(),
                 "executorGeneration": self.generation,
+                "instanceId": self.instance_id,
                 "reason": "executor_restarted",
                 "message": "The previous executor stopped after claiming this request. Inspect scene state before retrying with a new command id.",
                 "request": request,
@@ -341,6 +495,7 @@ class BridgeService:
                     "status": "rejected",
                     "finishedAt": protocol.utc_now(),
                     "executorGeneration": self.generation,
+                    "instanceId": self.instance_id,
                     "reason": reason,
                     "message": "The Blender-local STOP control rejected this queued request before claim.",
                 }
@@ -354,7 +509,7 @@ class BridgeService:
                 protocol.atomic_write_json(run_root / "result.json", result)
                 path.unlink(missing_ok=True)
 
-    def _process_next(self, root: Path, query: bool) -> None:
+    def _process_next(self, root: Path, query: bool, *, require_target: bool) -> None:
         pending = root / "queries" / "pending" if query else root / "commands" / "pending"
         source = protocol.first_json_file(pending)
         if source is None:
@@ -365,9 +520,9 @@ class BridgeService:
             processing = root / "commands" / "processing" / source.name
         if not protocol.claim_file(source, processing):
             return
-        self._execute_claimed(root, processing, query)
+        self._execute_claimed(root, processing, query, require_target=require_target)
 
-    def _execute_claimed(self, root: Path, claimed: Path, query: bool) -> None:
+    def _execute_claimed(self, root: Path, claimed: Path, query: bool, *, require_target: bool = False) -> None:
         started = time.monotonic()
         started_at = protocol.utc_now()
         command_id = claimed.stem
@@ -385,6 +540,13 @@ class BridgeService:
             if int(request.get("schemaVersion", 0)) != protocol.SCHEMA_VERSION:
                 raise protocol.ProtocolError(f"Unsupported schemaVersion: {request.get('schemaVersion')}")
             command_id = protocol.validate_request_id(request.get("commandId") or command_id)
+            target_instance = protocol.request_target_instance(request)
+            if require_target and target_instance is None:
+                raise RejectedRequest("Instance queue requests require target.instanceId")
+            if target_instance is not None and target_instance != self.instance_id:
+                raise RejectedRequest(
+                    f"Request targets Blender instance {target_instance!r}, not {self.instance_id!r}"
+                )
             request_digest = protocol.request_hash(request)
             existing_result = protocol.find_terminal_result(root, command_id, query=query)
             if existing_result:
@@ -397,6 +559,7 @@ class BridgeService:
                     "finishedAt": protocol.utc_now(),
                     "reason": "duplicate_terminal_command_id",
                     "requestHash": request_digest,
+                    "instanceId": self.instance_id,
                     "existingTerminalResult": str(existing_result.resolve()),
                 }
                 suffix = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
@@ -447,6 +610,7 @@ class BridgeService:
             "finishedAt": protocol.utc_now(),
             "elapsedSeconds": round(time.monotonic() - started, 6),
             "executorGeneration": self.generation,
+            "instanceId": self.instance_id,
             "stateRevision": self.state_revision,
             "outputs": outputs,
             "error": error_details,
@@ -466,7 +630,7 @@ class BridgeService:
 
     def _authorize(self, root: Path, request: dict[str, Any], action_names: list[str]) -> None:
         try:
-            spatial_policy.enforce(root, request, action_names)
+            spatial_policy.enforce(self.policy_root() or root, request, action_names)
         except spatial_policy.SpatialPolicyError as error:
             raise RejectedRequest(str(error)) from error
         if not any(name in MUTATION_ACTIONS for name in action_names):
@@ -481,7 +645,13 @@ class BridgeService:
     def _execute_action(self, root: Path, run_root: Path, command_id: str, index: int, action: dict[str, Any]) -> dict[str, Any]:
         name = str(action.get("action") or "")
         handlers: dict[str, Callable[[dict[str, Any]], Any]] = {
-            "bridge.ping": lambda _action: {"pong": True, "bridgeVersion": protocol.BRIDGE_VERSION, "blenderVersion": bpy.app.version_string},
+            "bridge.ping": lambda _action: {
+                "pong": True,
+                "bridgeVersion": protocol.BRIDGE_VERSION,
+                "blenderVersion": bpy.app.version_string,
+                "instanceId": self.instance_id,
+                "executorGeneration": self.generation,
+            },
             "state.refresh": lambda _action: self.export_state(root, reason="requested"),
             "scene.summary": lambda _action: state.scene_summary(),
             "scene.list_objects": lambda item: state.objects_summary(limit=max(1, min(int(item.get("limit") or 200), 500)), offset=max(0, int(item.get("offset") or 0))),

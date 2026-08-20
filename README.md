@@ -31,6 +31,16 @@ extension writes and watches `<project>/plan/blender/` using atomic local file
 operations. A persistent `bpy.app.timers` callback claims work; all `bpy`
 access stays on Blender's main thread. No Python socket worker is used.
 
+Each running Blender processor has a stable process-lifetime `instanceId` and
+owns an isolated workspace at
+`<project>/plan/blender/instances/<instanceId>/`. Instance-targeted requests
+must include `target.instanceId`; a processor never applies a request addressed
+to another Blender window. One live instance also holds a short heartbeat lease
+for the original `<project>/plan/blender/` queues and state files, preserving
+single-instance CLI compatibility without allowing multiple processors to race
+over them. Opening another `.blend` keeps the instance identity and changes the
+executor generation.
+
 Always-on state is deliberately bounded:
 
 - `bridge-health.json` — fresh processor heartbeat and binding identity;
@@ -247,6 +257,7 @@ or custom language.
 {
   "schemaVersion": 1,
   "commandId": "cmd-build-chair-001",
+  "target": {"instanceId": "blender-7f4c91a2b038"},
   "sessionId": "optional-owning-session",
   "title": "Build chair prototype",
   "intent": "Create the first inspectable blockout",

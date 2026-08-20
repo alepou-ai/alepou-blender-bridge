@@ -34,9 +34,10 @@ bridge.authority_initialized = True
 bridge.session_trust_mode = "trusted_development"
 root = bridge.root()
 assert root is not None
+target = {"instanceId": bridge.instance_id}
 protocol.ensure_layout(root)
 protocol.atomic_write_json(
-    policy.policy_path(root),
+    policy.policy_path(bridge.policy_root()),
     {"schemaVersion": 1, "mode": "opt_in", "fallbackAllowed": False},
 )
 
@@ -56,6 +57,7 @@ scene.asset(root=lamp, origin='base.asset_origin', center_axes=('X', 'Y'), groun
 spatial_request = {
     "schemaVersion": 1,
     "commandId": "bundled-spatial-build",
+    "target": target,
     "representation": {"kind": "spatial", "version": "0.1", "fallbackAllowed": False},
     "actions": [
         {
@@ -68,7 +70,7 @@ spatial_request = {
     ],
 }
 protocol.atomic_write_json(root / "commands" / "pending" / "bundled-spatial-build.json", spatial_request)
-bridge._process_next(root, query=False)
+bridge._process_next(root, query=False, require_target=True)
 spatial_result = protocol.read_json(root / "commands" / "applied" / "bundled-spatial-build.json")
 assert spatial_result["status"] == "applied", spatial_result
 for name in ("SP_base", "SP_arm", "SP_lamp"):
@@ -89,6 +91,7 @@ for name in (
 why_request = {
     "schemaVersion": 1,
     "commandId": "bundled-spatial-why",
+    "target": target,
     "representation": {"kind": "spatial", "version": "0.1", "fallbackAllowed": False},
     "actions": [
         {
@@ -100,7 +103,7 @@ why_request = {
     ],
 }
 protocol.atomic_write_json(root / "queries" / "pending" / "bundled-spatial-why.json", why_request)
-bridge._process_next(root, query=True)
+bridge._process_next(root, query=True, require_target=True)
 why_result = protocol.read_json(root / "queries" / "results" / "bundled-spatial-why.json")
 why = why_result["outputs"][0]["value"]["value"]
 assert why["source"] == "relation:arm_after_base", why
@@ -108,6 +111,7 @@ assert why["source"] == "relation:arm_after_base", why
 raw_request = {
     "schemaVersion": 1,
     "commandId": "bundled-raw-compatible",
+    "target": target,
     "representation": {"kind": "raw_bpy"},
     "actions": [
         {
@@ -117,17 +121,17 @@ raw_request = {
     ],
 }
 protocol.atomic_write_json(root / "commands" / "pending" / "bundled-raw-compatible.json", raw_request)
-bridge._process_next(root, query=False)
+bridge._process_next(root, query=False, require_target=True)
 raw_result = protocol.read_json(root / "commands" / "applied" / "bundled-raw-compatible.json")
 assert raw_result["status"] == "applied", raw_result
 
 protocol.atomic_write_json(
-    policy.policy_path(root),
+    policy.policy_path(bridge.policy_root()),
     {"schemaVersion": 1, "mode": "required", "fallbackAllowed": False},
 )
 rejected_request = {**raw_request, "commandId": "bundled-required-reject"}
 protocol.atomic_write_json(root / "commands" / "pending" / "bundled-required-reject.json", rejected_request)
-bridge._process_next(root, query=False)
+bridge._process_next(root, query=False, require_target=True)
 rejected = protocol.read_json(root / "commands" / "rejected" / "bundled-required-reject.json")
 assert rejected["status"] == "rejected", rejected
 

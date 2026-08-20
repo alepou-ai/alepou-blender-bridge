@@ -23,6 +23,26 @@ class ProtocolTests(unittest.TestCase):
             protocol.atomic_write_json(root / "bridge-health.json", {"ok": True})
             self.assertEqual(json.loads((root / "bridge-health.json").read_text(encoding="utf-8")), {"ok": True})
 
+    def test_instance_layout_and_request_target_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            root = protocol.bridge_root(project)
+            protocol.ensure_project_layout(root)
+            instance = protocol.instance_root(root, "blender-a")
+            protocol.ensure_layout(instance)
+            self.assertEqual(instance, root / "instances" / "blender-a")
+            self.assertTrue((instance / "commands" / "pending").is_dir())
+            self.assertEqual(
+                protocol.request_target_instance({"target": {"instanceId": "blender-a"}}),
+                "blender-a",
+            )
+            self.assertIsNone(protocol.request_target_instance({}))
+            for invalid in ("../escape", "has space", "a" * 129):
+                with self.assertRaises(protocol.ProtocolError):
+                    protocol.instance_root(root, invalid)
+            with self.assertRaises(protocol.ProtocolError):
+                protocol.request_target_instance({"target": {}})
+
     def test_safe_child_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

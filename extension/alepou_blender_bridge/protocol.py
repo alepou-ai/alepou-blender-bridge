@@ -9,7 +9,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 SCHEMA_VERSION = 1
 BRIDGE_VERSION = "0.2.2"
@@ -53,10 +53,19 @@ def bridge_root(project_root: str | os.PathLike[str]) -> Path:
     return canonical_project_root(project_root) / "plan" / "blender"
 
 
+def instance_root(root: Path, instance_id: Any) -> Path:
+    return safe_child(root / "instances", validate_instance_id(instance_id))
+
+
 def ensure_layout(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     for relative in BRIDGE_DIRS:
         (root / relative).mkdir(parents=True, exist_ok=True)
+
+
+def ensure_project_layout(root: Path) -> None:
+    ensure_layout(root)
+    (root / "instances").mkdir(parents=True, exist_ok=True)
 
 
 def validate_request_id(value: Any) -> str:
@@ -64,6 +73,24 @@ def validate_request_id(value: Any) -> str:
     if not ID_PATTERN.fullmatch(request_id):
         raise ProtocolError("commandId must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
     return request_id
+
+
+def validate_instance_id(value: Any) -> str:
+    instance_id = str(value or "").strip()
+    if not ID_PATTERN.fullmatch(instance_id):
+        raise ProtocolError("instanceId must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+    return instance_id
+
+
+def request_target_instance(value: Mapping[str, Any]) -> str | None:
+    target = value.get("target")
+    if target is None:
+        return None
+    if not isinstance(target, Mapping):
+        raise ProtocolError("target must be an object")
+    if "instanceId" not in target:
+        raise ProtocolError("target.instanceId is required when target is present")
+    return validate_instance_id(target.get("instanceId"))
 
 
 def safe_child(root: Path, relative: str | os.PathLike[str]) -> Path:
