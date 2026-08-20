@@ -60,7 +60,7 @@ class CompilePlan:
     asset: Mapping[str, Any] | None = None
     runtime_version: str = "0.1.0"
     backend: str = "blender"
-    backend_version: str = "0.1.0"
+    backend_version: str = "0.1.1"
     fallback_allowed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -124,6 +124,7 @@ def _scale_parameters(entity: ResolvedEntity, scale: float) -> dict[str, Any]:
 
 def _desired(entity: ResolvedEntity, resolved: ResolvedScene) -> dict[str, Any]:
     scale = resolved.unit_scale_meters
+    parameters = _scale_parameters(entity, scale) if entity.is_geometry else {}
     desired = {
         "entityId": entity.id,
         "kind": entity.kind,
@@ -133,10 +134,17 @@ def _desired(entity: ResolvedEntity, resolved: ResolvedScene) -> dict[str, Any]:
         "children": list(entity.children),
         "locationMeters": [coordinate * scale for coordinate in entity.world_center],
         "rotationMatrix": [list(row) for row in entity.world_rotation],
-        "parametersMeters": _scale_parameters(entity, scale) if entity.is_geometry else {},
+        "parametersMeters": parameters,
         "metadata": dict(entity.metadata),
         "sourceHash": resolved.source_hash,
     }
+    if entity.is_geometry:
+        # Mesh identity is governed only by authored geometry and mesh policy.
+        # World transforms, hierarchy, metadata and whole-scene source changes
+        # must not force Blender to replace an otherwise identical datablock.
+        desired["geometryFingerprint"] = _fingerprint(
+            {"kind": entity.kind, "parametersMeters": parameters}
+        )
     desired["fingerprint"] = _fingerprint({key: value for key, value in desired.items() if key != "sourceHash"})
     return desired
 

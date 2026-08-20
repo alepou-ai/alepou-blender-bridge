@@ -58,6 +58,34 @@ class SpatialBlenderTests(unittest.TestCase):
         self.assertIn("external_materials = list(old.materials)", source)
         self.assertIn("mesh.materials.append(material)", source)
 
+    def test_generated_update_preserves_mesh_identity_for_transform_only_changes(self):
+        scene = spatial.Scene("stable_mesh")
+        moving_frame = scene.frame("moving_frame", origin=(2, 0, 0))
+        scene.cylinder("passenger", radius=1, length=2, frame=moving_frame)
+        compiled = compile_script(build_compile_plan(scene.resolve(), mode="update"))
+        moved = spatial.Scene("stable_mesh")
+        moved_frame = moved.frame("moving_frame", origin=(3, 0, 0))
+        moved.cylinder("passenger", radius=1, length=2, frame=moved_frame)
+        moved_compiled = compile_script(build_compile_plan(moved.resolve(), mode="update"))
+        ast.parse(compiled.source)
+        desired = next(
+            operation.desired
+            for operation in compiled.plan.operations
+            if operation.entity_id == "passenger"
+        )
+        moved_desired = next(
+            operation.desired
+            for operation in moved_compiled.plan.operations
+            if operation.entity_id == "passenger"
+        )
+        self.assertRegex(desired["geometryFingerprint"], r"^[a-f0-9]{64}$")
+        self.assertEqual(desired["geometryFingerprint"], moved_desired["geometryFingerprint"])
+        self.assertNotEqual(desired["fingerprint"], moved_desired["fingerprint"])
+        self.assertIn('obj["spatial.geometry_fingerprint"]', compiled.source)
+        self.assertIn("def _stored_geometry_fingerprint(obj):", compiled.source)
+        self.assertIn('RESULT["meshPreserved"].append(entity_id)', compiled.source)
+        self.assertIn('RESULT["meshReplaced"].append(entity_id)', compiled.source)
+
     def test_generated_primitives_use_authored_quality_and_shading(self):
         scene = spatial.Scene("quality")
         scene.cylinder("mechanical", radius=1, length=2, segments=72, shading=spatial.Shading.smooth_by_angle(40))
