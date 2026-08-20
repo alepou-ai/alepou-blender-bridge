@@ -7,3 +7,5 @@ build/
 *.zip
 runs/
 *.egg-info/
+artifacts/clean-install-*/
+artifacts/clean-project-*/

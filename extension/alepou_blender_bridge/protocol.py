@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
-BRIDGE_VERSION = "0.2.1"
+BRIDGE_VERSION = "0.2.2"
 DEFAULT_MAX_JSON_BYTES = 4 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 

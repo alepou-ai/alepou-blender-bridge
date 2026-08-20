@@ -51,7 +51,7 @@ python scripts\build_packages.py `
 ```
 
 For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.2.1.zip`. The extension package
+Disk** and choose `dist/alepou_blender_bridge-0.2.2.zip`. The extension package
 includes the Spatial Python runtime used inside Blender; normal Alepou users do
 not install a Python wheel or run `pip`. For Blender 4.1, use the Add-ons install
 control and choose the `-legacy.zip` package. That legacy package retains the

@@ -30,6 +30,8 @@ protocol = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.pr
 policy = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_policy")
 runtime = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_runtime")
 bridge = service_module.get_service()
+bridge.authority_initialized = True
+bridge.session_trust_mode = "trusted_development"
 root = bridge.root()
 assert root is not None
 protocol.ensure_layout(root)
@@ -44,9 +46,11 @@ bpy.ops.object.delete(use_global=False)
 source = """import spatial
 scene = spatial.Scene('bundled_lamp', units='mm')
 base = scene.box('base', size=(240, 240, 20), center=(0, 0, 10), bevel=spatial.Bevel(6, 3))
-arm = scene.cylinder('arm', radius=12, length=400, axis='Z')
+base.anchor('asset_origin', position=(0, 0, -10), direction=(1, 0, 0), up=(0, 0, 1))
+arm = scene.cylinder('arm', radius=12, length=400, axis='Z', segments=72, shading=spatial.Shading.smooth_by_angle(30))
 arm.after(base, gap=10, axis='Z', id='arm_after_base')
-scene.assembly('lamp', children=[base, arm])
+lamp = scene.assembly('lamp', children=[base, arm])
+scene.asset(root=lamp, origin='base.asset_origin', center_axes=('X', 'Y'), ground_axis='Z', up='Z', forward='X')
 """
 
 spatial_request = {
@@ -69,6 +73,10 @@ spatial_result = protocol.read_json(root / "commands" / "applied" / "bundled-spa
 assert spatial_result["status"] == "applied", spatial_result
 for name in ("SP_base", "SP_arm", "SP_lamp"):
     assert bpy.data.objects.get(name) is not None, name
+assert len(bpy.data.objects["SP_arm"].data.vertices) == 144
+asset_state = json.loads(str(bpy.context.scene["spatial.asset"]))
+assert asset_state["root"] == "lamp", asset_state
+assert asset_state["originWorld"] == [0.0, 0.0, 0.0], asset_state
 for name in (
     "action-00.spatial.py",
     "action-00.spatial-source.normalized.json",
@@ -137,6 +145,7 @@ print(
             "why": why,
             "rawCompatible": True,
             "requiredRejectedRaw": True,
+            "spatialAsset": asset_state,
             "output": str(output),
         },
         sort_keys=True,
