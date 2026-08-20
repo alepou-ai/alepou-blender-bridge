@@ -145,6 +145,10 @@ class BridgeService:
         except (FileNotFoundError, OSError, ValueError):
             return None
 
+    def project_id(self) -> str | None:
+        value = str(_setting("project_id", "ALEPOU_BLENDER_PROJECT_ID", "") or "").strip()
+        return value[:200] or None
+
     def _legacy_owner_age(self, value: dict[str, Any] | None) -> float:
         if value is None:
             return float("inf")
@@ -400,6 +404,7 @@ class BridgeService:
                 f"- Bridge: {protocol.BRIDGE_VERSION}",
                 f"- Blender: {bpy.app.version_string}",
                 f"- Instance: {self.instance_id}",
+                f"- Alepou project: {self.project_id() or '(manual binding)'}",
                 f"- Scene: {summary['scene']}",
                 f"- Blend file: {summary['blendFile'] or '(unsaved)'}",
                 f"- Objects: {summary['objectCount']}",
@@ -432,6 +437,7 @@ class BridgeService:
                 "executorGeneration": self.generation,
                 "startedAt": self.started_at,
                 "projectRoot": str(self.project_root()) if self.project_root() else None,
+                "projectId": self.project_id(),
                 "bridgeRoot": str(publication_root.resolve()),
                 "blendFile": bpy.data.filepath or None,
                 "unsavedBlend": not bool(bpy.data.filepath),

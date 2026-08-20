@@ -61,7 +61,7 @@ python scripts\build_packages.py `
 ```
 
 For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.2.2.zip`. The extension package
+Disk** and choose `dist/alepou_blender_bridge-0.3.0.zip`. The extension package
 includes the Spatial Python runtime used inside Blender; normal Alepou users do
 not install a Python wheel or run `pip`. For Blender 4.1, use the Add-ons install
 control and choose the `-legacy.zip` package. That legacy package retains the
@@ -69,9 +69,17 @@ raw bridge but does not include Blender's extension-managed Spatial wheel. Enabl
 **Alepou Blender Bridge**. During source development you can instead add
 `extension/` to Blender's Python path and register the package directly.
 
-In the add-on preferences:
+With Alepou running, open the **Alepou** tab in Blender's 3D View sidebar
+(`N`), click **Refresh Alepou Projects**, select the exact project, and click
+**Bind and Initialize**. The list uses a loopback-only, per-run authenticated
+agent capability and shows the canonical root so projects with the same name
+remain unambiguous. Binding publishes health and scene state immediately but
+always returns authority to Observation Only. The manual project-folder field
+remains available when Alepou is offline.
 
-1. choose the Alepou project root;
+In the add-on preferences you can also:
+
+1. enter a project root manually for offline use;
 2. enable processing;
 3. leave the default observation mode for reads and captures, or explicitly
    choose Local Trusted Development for recorded scripts and scene mutations;

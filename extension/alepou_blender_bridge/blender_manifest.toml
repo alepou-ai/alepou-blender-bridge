@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "alepou_blender_bridge"
-version = "0.2.2"
+version = "0.3.0"
 name = "Alepou Blender Bridge"
 tagline = "Auditable local bridge for AI-assisted Blender work"
 maintainer = "Alepou <hello@alepou.ai>"
@@ -12,3 +12,4 @@ license = ["SPDX:Apache-2.0"]
 
 [permissions]
 files = "Read and write the explicitly bound Alepou project"
+network = "Discover projects from authenticated Alepou on this computer"
