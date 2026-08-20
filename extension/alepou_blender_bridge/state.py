@@ -67,7 +67,7 @@ def _identity(obj: Any) -> dict[str, Any]:
         "type": obj.type,
         "library": library,
         "alepouId": obj.get("alepou_id"),
-        "spatialId": obj.get("spatial_id"),
+        "spatialId": obj.get("spatial.entity_id") or obj.get("spatial_id"),
     }
 
 

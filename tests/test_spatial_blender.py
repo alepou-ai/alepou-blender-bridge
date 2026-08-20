@@ -24,6 +24,7 @@ runtime = importlib.util.module_from_spec(RUNTIME_SPEC)
 assert RUNTIME_SPEC and RUNTIME_SPEC.loader
 sys.modules[RUNTIME_SPEC.name] = runtime
 RUNTIME_SPEC.loader.exec_module(runtime)
+STATE_PATH = REPO / "extension" / "alepou_blender_bridge" / "state.py"
 
 
 class SpatialBlenderTests(unittest.TestCase):
@@ -56,6 +57,10 @@ class SpatialBlenderTests(unittest.TestCase):
         )
         self.assertIn("external_materials = list(old.materials)", source)
         self.assertIn("mesh.materials.append(material)", source)
+
+    def test_state_export_prefers_canonical_spatial_identity_with_legacy_fallback(self):
+        source = STATE_PATH.read_text(encoding="utf-8")
+        self.assertIn('obj.get("spatial.entity_id") or obj.get("spatial_id")', source)
 
     def test_project_mode_enforces_off_opt_in_and_required(self):
         raw = {"actions": [{"action": "script.execute", "source": "import bpy"}]}
