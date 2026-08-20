@@ -29,6 +29,7 @@ service_module = importlib.import_module("bl_ext.user_default.alepou_blender_bri
 protocol = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.protocol")
 policy = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_policy")
 runtime = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_runtime")
+assert protocol.BRIDGE_VERSION == "0.3.1", protocol.BRIDGE_VERSION
 bridge = service_module.get_service()
 bridge.authority_initialized = True
 bridge.session_trust_mode = "trusted_development"
@@ -88,6 +89,41 @@ for name in (
 ):
     assert (root / "runs" / "bundled-spatial-build" / name).is_file(), name
 
+base_mesh_pointer = bpy.data.objects["SP_base"].data.as_pointer()
+arm_mesh_pointer = bpy.data.objects["SP_arm"].data.as_pointer()
+arm_z_before = float(bpy.data.objects["SP_arm"].matrix_world.translation.z)
+external_finish = bpy.data.materials.new("BundledExternalFinish")
+bpy.data.objects["SP_arm"].data.materials.append(external_finish)
+updated_source = source.replace(
+    "size=(240, 240, 20), center=(0, 0, 10)",
+    "size=(240, 240, 30), center=(0, 0, 15)",
+).replace("position=(0, 0, -10)", "position=(0, 0, -15)")
+assert updated_source != source
+update_request = {
+    **spatial_request,
+    "commandId": "bundled-spatial-stable-update",
+    "actions": [
+        {
+            **spatial_request["actions"][0],
+            "source": updated_source,
+        }
+    ],
+}
+protocol.atomic_write_json(root / "commands" / "pending" / "bundled-spatial-stable-update.json", update_request)
+bridge._process_next(root, query=False, require_target=True)
+update_result = protocol.read_json(root / "commands" / "applied" / "bundled-spatial-stable-update.json")
+assert update_result["status"] == "applied", update_result
+assert bpy.data.objects["SP_base"].data.as_pointer() != base_mesh_pointer
+assert bpy.data.objects["SP_arm"].data.as_pointer() == arm_mesh_pointer
+assert list(bpy.data.objects["SP_arm"].data.materials) == [external_finish]
+arm_z_after = float(bpy.data.objects["SP_arm"].matrix_world.translation.z)
+assert abs((arm_z_after - arm_z_before) - 0.01) < 1e-6, (arm_z_before, arm_z_after)
+update_stdout = update_result["outputs"][0]["value"]["execution"]["stdout"]
+result_line = next(line for line in update_stdout.splitlines() if line.startswith("SPATIAL_RESULT_JSON="))
+stable_update = json.loads(result_line.removeprefix("SPATIAL_RESULT_JSON="))
+assert stable_update["meshReplaced"] == ["base"], stable_update
+assert stable_update["meshPreserved"] == ["arm"], stable_update
+
 why_request = {
     "schemaVersion": 1,
     "commandId": "bundled-spatial-why",
@@ -144,12 +180,14 @@ print(
         {
             "status": "passed",
             "runtime": runtime.describe(),
+            "bridgeVersion": protocol.BRIDGE_VERSION,
             "spatialModule": importlib.import_module("spatial").__file__,
             "objects": sorted(obj.name for obj in bpy.data.objects),
             "why": why,
             "rawCompatible": True,
             "requiredRejectedRaw": True,
             "spatialAsset": asset_state,
+            "stableUpdate": stable_update,
             "output": str(output),
         },
         sort_keys=True,
