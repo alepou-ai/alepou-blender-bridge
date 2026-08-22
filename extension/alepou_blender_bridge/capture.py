@@ -25,6 +25,10 @@ VIEW_DIRECTIONS = {
     "north-west": Vector((-1.0, -1.0, 0.75)).normalized(),
 }
 
+PERSPECTIVE_VIEWS = {"north-east", "north-west"}
+DIAGNOSTIC_MODES = {"beauty", "clay", "silhouette", "studio", "wireframe"}
+DIAGNOSTIC_PROJECTIONS = {"auto", "orthographic", "perspective"}
+
 
 def ensure_standard_camera(scene: Any | None = None) -> Any:
     scene = scene or bpy.context.scene
@@ -66,27 +70,81 @@ def _target_bounds(action: dict[str, Any]) -> dict[str, Any]:
     return state.union_bounds()
 
 
-def diagnostic_capture(action: dict[str, Any], captures_root: Path, command_id: str) -> dict[str, Any]:
-    scene = bpy.context.scene
+def _capture_direction(action: dict[str, Any]) -> tuple[str, Vector]:
+    custom = action.get("direction")
+    if custom is not None:
+        if not isinstance(custom, (list, tuple)) or len(custom) != 3:
+            raise ValueError("Diagnostic direction must contain exactly three numeric components")
+        try:
+            direction = Vector(float(component) for component in custom)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Diagnostic direction must contain exactly three numeric components") from error
+        if not all(math.isfinite(component) for component in direction) or direction.length == 0.0:
+            raise ValueError("Diagnostic direction must be finite and non-zero")
+        return "custom", direction.normalized()
+
     view = str(action.get("view") or "north-east").lower()
-    mode = str(action.get("mode") or "clay").lower()
     if view not in VIEW_DIRECTIONS:
         raise ValueError(f"Unsupported diagnostic view: {view}")
-    if mode not in {"clay", "silhouette", "wireframe", "beauty"}:
+    return view, VIEW_DIRECTIONS[view]
+
+
+def _projected_target_size(size: Vector, rotation: Any) -> tuple[float, float, float]:
+    half_size = size * 0.5
+    matrix = rotation.to_matrix()
+    right = matrix @ Vector((1.0, 0.0, 0.0))
+    up = matrix @ Vector((0.0, 1.0, 0.0))
+    backward = matrix @ Vector((0.0, 0.0, 1.0))
+
+    def span(axis: Vector) -> float:
+        return 2.0 * sum(abs(axis[index]) * half_size[index] for index in range(3))
+
+    return span(right), span(up), span(backward)
+
+
+def diagnostic_capture(action: dict[str, Any], captures_root: Path, command_id: str) -> dict[str, Any]:
+    scene = bpy.context.scene
+    view, direction = _capture_direction(action)
+    mode = str(action.get("mode") or "clay").lower()
+    if mode not in DIAGNOSTIC_MODES:
         raise ValueError(f"Unsupported diagnostic mode: {mode}")
     resolution = max(64, min(int(action.get("resolution") or 512), 2048))
-    margin = max(1.01, min(float(action.get("margin") or 1.2), 4.0))
+    margin = float(action.get("margin") or 1.15)
+    if not math.isfinite(margin) or margin < 1.0:
+        raise ValueError("Diagnostic margin must be a finite number greater than or equal to 1.0")
+    projection = str(action.get("projection") or "auto").lower()
+    if projection not in DIAGNOSTIC_PROJECTIONS:
+        raise ValueError(f"Unsupported diagnostic projection: {projection}")
     bounds = _target_bounds(action)
     center = Vector(bounds["center"])
     size = Vector(bounds["size"])
-    radius = max(float(size.length) * 0.5, 0.5)
-    direction = VIEW_DIRECTIONS[view]
+    if not all(math.isfinite(component) and component >= 0.0 for component in size):
+        raise ValueError("Diagnostic target has invalid bounds")
+    radius = float(size.length) * 0.5
+    if radius <= 0.0:
+        raise ValueError("Diagnostic target has no measurable extent")
+
     camera = ensure_standard_camera(scene)
-    camera.location = center + direction * (radius * 3.0 + 1.0)
-    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
-    camera.data.type = "ORTHO" if view not in {"north-east", "north-west"} else "PERSP"
-    camera.data.ortho_scale = max(size.x, size.y, size.z, 1.0) * margin
-    camera.data.lens = 50.0
+    camera.rotation_euler = (-direction).to_track_quat("-Z", "Y").to_euler()
+    projected_width, projected_height, projected_depth = _projected_target_size(size, camera.rotation_euler)
+    if max(projected_width, projected_height) <= 0.0:
+        raise ValueError("Diagnostic target has no visible extent from the requested direction")
+
+    lens = float(action.get("lens") or 50.0)
+    if not math.isfinite(lens) or lens <= 0.0:
+        raise ValueError("Diagnostic lens must be a finite positive number")
+    camera.data.lens = lens
+    use_perspective = projection == "perspective" or (projection == "auto" and view in PERSPECTIVE_VIEWS)
+    camera.data.type = "PERSP" if use_perspective else "ORTHO"
+    if use_perspective:
+        half_angle = min(camera.data.angle_x, camera.data.angle_y) * 0.5
+        distance = radius * margin / math.sin(half_angle)
+    else:
+        camera.data.ortho_scale = max(projected_width, projected_height) * margin
+        distance = radius * 3.0
+    camera.location = center + direction * distance
+    camera.data.clip_start = max(radius * 0.001, 1e-6)
+    camera.data.clip_end = max(distance + radius * 4.0, camera.data.clip_start * 2.0)
 
     suffix = str(action.get("filename") or f"{command_id}-{view}-{mode}.png")
     if not suffix.lower().endswith(".png"):
@@ -121,14 +179,14 @@ def diagnostic_capture(action: dict[str, Any], captures_root: Path, command_id: 
         if mode != "beauty":
             scene.render.engine = "BLENDER_WORKBENCH"
             shading.light = "FLAT" if mode == "silhouette" else "STUDIO"
-            shading.color_type = "SINGLE"
+            shading.color_type = "MATERIAL" if mode == "studio" else "SINGLE"
             shading.single_color = (0.8, 0.8, 0.8) if mode == "clay" else (0.02, 0.02, 0.02)
-            shading.show_shadows = mode == "clay"
-            shading.show_cavity = mode in {"clay", "wireframe"}
+            shading.show_shadows = mode in {"clay", "studio"}
+            shading.show_cavity = mode in {"clay", "studio", "wireframe"}
             if hasattr(shading, "show_outline"):
                 shading.show_outline = mode == "wireframe"
             if hasattr(shading, "show_specular_highlight"):
-                shading.show_specular_highlight = mode == "clay"
+                shading.show_specular_highlight = mode in {"clay", "studio"}
             scene.render.film_transparent = mode == "silhouette"
         bpy.ops.render.render(write_still=True)
     finally:
@@ -153,6 +211,11 @@ def diagnostic_capture(action: dict[str, Any], captures_root: Path, command_id: 
         "targetBounds": bounds,
         "camera": camera.name_full,
         "cameraType": camera.data.type,
+        "cameraDirection": state.vector(direction),
+        "cameraDistance": distance,
+        "cameraLens": camera.data.lens,
+        "projectedTargetSize": [projected_width, projected_height, projected_depth],
+        "orthoScale": camera.data.ortho_scale if camera.data.type == "ORTHO" else None,
     }
 
 

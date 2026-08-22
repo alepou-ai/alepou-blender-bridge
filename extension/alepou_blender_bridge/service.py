@@ -337,7 +337,10 @@ class BridgeService:
             "observationActions": sorted(OBSERVATION_ACTIONS),
             "mutationActions": sorted(MUTATION_ACTIONS),
             "diagnosticViews": sorted(capture.VIEW_DIRECTIONS),
-            "diagnosticModes": ["beauty", "clay", "silhouette", "wireframe"],
+            "diagnosticModes": sorted(capture.DIAGNOSTIC_MODES),
+            "diagnosticProjections": sorted(capture.DIAGNOSTIC_PROJECTIONS),
+            "diagnosticCustomDirection": True,
+            "diagnosticAdaptiveFraming": True,
             "spatialAuthoring": {**spatial_policy.describe(policy_root), **spatial_runtime.describe()},
             "limits": {"objectsSummary": 500, "jsonRequestBytes": protocol.DEFAULT_MAX_JSON_BYTES},
         }

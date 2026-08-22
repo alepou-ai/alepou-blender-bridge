@@ -61,7 +61,7 @@ python scripts\build_packages.py `
 ```
 
 For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.3.1.zip`. The extension package
+Disk** and choose `dist/alepou_blender_bridge-0.3.2.zip`. The extension package
 includes the Spatial Python runtime used inside Blender; normal Alepou users do
 not install a Python wheel or run `pip`. For Blender 4.1, use the Add-ons install
 control and choose the `-legacy.zip` package. That legacy package retains the
@@ -300,10 +300,13 @@ Trusted mutation:
 - `script.execute`, `scene.save_copy`, `scene.restore_snapshot`;
 - `object.select`, `camera.ensure_standard`.
 
-Diagnostic renders support named orthographic and perspective views, explicit
-or object/scene bounds, fixed resolution and margin, plus clay, silhouette,
-wireframe, or beauty modes. Authored and dependency-graph-evaluated bounds are
-reported separately.
+Diagnostic renders offer named or caller-supplied directions, orthographic or
+perspective projection, and clay, studio-lit material, silhouette, wireframe,
+or scene-lit beauty modes. Framing is fitted to the requested target's actual
+bounds with no metre-scale floor, so small real-scale products remain readable.
+Agents may instead author their own cameras and lighting when that better exposes
+the subject. Authored and dependency-graph-evaluated bounds are reported
+separately.
 
 ## Validation
 

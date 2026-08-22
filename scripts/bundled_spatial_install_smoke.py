@@ -29,7 +29,7 @@ service_module = importlib.import_module("bl_ext.user_default.alepou_blender_bri
 protocol = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.protocol")
 policy = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_policy")
 runtime = importlib.import_module("bl_ext.user_default.alepou_blender_bridge.spatial_runtime")
-assert protocol.BRIDGE_VERSION == "0.3.1", protocol.BRIDGE_VERSION
+assert protocol.BRIDGE_VERSION == "0.3.2", protocol.BRIDGE_VERSION
 bridge = service_module.get_service()
 bridge.authority_initialized = True
 bridge.session_trust_mode = "trusted_development"
