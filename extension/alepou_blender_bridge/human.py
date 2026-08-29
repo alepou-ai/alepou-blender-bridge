@@ -197,6 +197,40 @@ def add_morphs(obj: Any, root: str | Path) -> list[str]:
     return added
 
 
+def morphed_coordinates(obj: Any) -> list[tuple[float, float, float]]:
+    """World-space vertex positions with morphs applied and modifiers ignored.
+
+    Deliberately not the depsgraph-evaluated mesh. Modifiers may add or remove
+    vertices - a Mask hiding helpers, a render-time Subdivision - and then index
+    N no longer means vertex N. That failure is silent with Subdivision, which
+    yields a plausible-looking but wrong rig, so positions are resolved the same
+    way the substrate defines a morph: V = V0 + sum(wi * Di).
+    """
+    obj = _mesh_object(obj)
+    mesh = obj.data
+    matrix = obj.matrix_world
+    keys = mesh.shape_keys
+
+    if keys is None or not keys.use_relative:
+        return [tuple(matrix @ v.co) for v in mesh.vertices]
+
+    blocks = keys.key_blocks
+    reference = blocks[0]
+    positions = [reference.data[i].co.copy() for i in range(len(mesh.vertices))]
+
+    for block in blocks[1:]:
+        weight = block.value
+        if abs(weight) < 1e-9:
+            continue
+        relative = block.relative_key or reference
+        for index in range(len(positions)):
+            delta = block.data[index].co - relative.data[index].co
+            if delta.length_squared:
+                positions[index] += delta * weight
+
+    return [tuple(matrix @ position) for position in positions]
+
+
 def build_rig(
     obj: Any,
     resource_dir: str | Path | None = None,
@@ -221,9 +255,7 @@ def build_rig(
     bones = skeleton["bones"]
     joints = skeleton["joints"]
 
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    evaluated = obj.evaluated_get(depsgraph)
-    coords = [tuple(obj.matrix_world @ v.co) for v in evaluated.data.vertices]
+    coords = morphed_coordinates(obj)
 
     def endpoint(joint_name: str) -> Vector:
         if joint_name not in joints:

@@ -114,6 +114,33 @@ def main():
         shifted = (jaw2.head_local - jaw.head_local).length
         check("rebuilt rig tracks the morph", shifted > 1e-5, "{:.5f} m".format(shifted))
 
+    print("rig survives a modifier stack")
+    # A Mask hiding helpers and a render-time Subdivision both change the
+    # evaluated vertex count. Reading positions from the evaluated mesh raised
+    # IndexError under Mask and silently produced a wrong rig under Subdivision,
+    # so the rig must resolve positions from shape keys instead.
+    mask = obj.modifiers.new(name="HideHelpers", type="MASK")
+    mask.vertex_group = "alepou_helpers"
+    mask.invert_vertex_group = True
+    subsurf = obj.modifiers.new(name="RenderSubdiv", type="SUBSURF")
+    subsurf.levels = 1
+    bpy.context.view_layer.update()
+
+    modified_rig = None
+    try:
+        modified_rig = human.build_rig(obj, PACK, name="AlepouHumanRigModifiers")
+    except Exception as error:  # noqa: BLE001 - the smoke reports, it does not raise
+        check("rig builds with Mask and Subdivision present", False, repr(error))
+    if modified_rig is not None:
+        check("rig builds with Mask and Subdivision present", True)
+        jaw3 = modified_rig.data.bones.get("jaw")
+        if jaw2 and jaw3:
+            drift = (jaw3.head_local - jaw2.head_local).length
+            check("modifiers do not move the rig", drift < 1e-6, "{:.6f} m".format(drift))
+
+    obj.modifiers.remove(mask)
+    obj.modifiers.remove(subsurf)
+
     print("topology guard")
     signature = human.verify_topology(obj)
     check("verify passes on canonical mesh", bool(signature))
