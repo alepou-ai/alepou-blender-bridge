@@ -839,3 +839,130 @@ def load_material(path: str | Path) -> MaterialDefinition:
         except ValueError as error:
             raise HumanDataError("{}: bad value on {!r}: {}".format(path, line, error)) from error
     return material
+
+
+# --- Face pose units ----------------------------------------------------------
+#
+# The pack ships 60 named face pose units as frames of a BVH whose skeleton is
+# the same 163 bones as the default rig - checked, not assumed: every joint in
+# the BVH is a bone in default.mhskel and the reverse. Frame N of the animation
+# is the pose named at index N of framemapping in the JSON beside it.
+#
+# This is what makes the face animatable without inventing anything: speech is
+# a weighted blend of JawDrop, LipsKiss, MouthLeft/RightPullSide and the lip
+# units, and expression is a blend of the brow, lid and cheek units.
+
+
+class PoseUnits:
+    """Named face poses as per-bone Euler rotations, relative to Rest."""
+
+    __slots__ = ("names", "channels", "frames", "rest")
+
+    def __init__(self, names, channels, frames, rest):
+        self.names = names            # pose name -> frame index
+        self.channels = channels      # ordered [(bone, [channel names])]
+        self.frames = frames          # list of flat float rows
+        self.rest = rest              # frame index treated as neutral
+
+    # Every frame carries sub-degree differences on nearly all 163 bones, so
+    # taking any non-zero delta posed 157 bones for a jaw drop and let the neck
+    # and spine drift visibly between visemes. Below this the difference is
+    # noise in the capture, not intent.
+    NOISE_FLOOR = 0.35  # degrees
+
+    def rotations(self, pose: str, floor: float | None = None
+                  ) -> dict[str, tuple[float, float, float]]:
+        """Bone -> (x, y, z) Euler in radians, as an offset from Rest."""
+        import math
+
+        floor = math.radians(self.NOISE_FLOOR if floor is None else floor)
+        if pose not in self.names:
+            raise HumanDataError("No pose unit named {!r}".format(pose))
+        row = self.frames[self.names[pose]]
+        base = self.frames[self.rest]
+        out: dict[str, tuple[float, float, float]] = {}
+        cursor = 0
+        for bone, channels in self.channels:
+            angles = {"X": 0.0, "Y": 0.0, "Z": 0.0}
+            for offset, channel in enumerate(channels):
+                if channel.endswith("rotation"):
+                    angles[channel[0]] = math.radians(row[cursor + offset]
+                                                      - base[cursor + offset])
+            cursor += len(channels)
+            if max(abs(v) for v in angles.values()) > floor:
+                out[bone] = (angles["X"], angles["Y"], angles["Z"])
+        return out
+
+    def blend(self, weights: dict[str, float]) -> dict[str, tuple[float, float, float]]:
+        """Weighted sum of several units, which is how a viseme is built."""
+        total: dict[str, list[float]] = {}
+        for pose, weight in weights.items():
+            if not weight:
+                continue
+            for bone, angles in self.rotations(pose).items():
+                acc = total.setdefault(bone, [0.0, 0.0, 0.0])
+                for axis in range(3):
+                    acc[axis] += angles[axis] * weight
+        return {bone: (a[0], a[1], a[2]) for bone, a in total.items()}
+
+
+def load_pose_units(bvh_path: str | Path, json_path: str | Path | None = None) -> PoseUnits:
+    bvh_path = Path(bvh_path)
+    json_path = Path(json_path) if json_path else bvh_path.with_suffix(".json")
+    try:
+        text = bvh_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise HumanDataError("Cannot read {}: {}".format(bvh_path, error)) from error
+
+    tokens = text.split()
+    channels: list[tuple[str, list[str]]] = []
+    index = 0
+    stack: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("ROOT", "JOINT"):
+            stack.append(tokens[index + 1])
+            index += 2
+        elif token == "End":
+            stack.append("__end__")
+            index += 2
+        elif token == "CHANNELS":
+            count = int(tokens[index + 1])
+            channels.append((stack[-1], tokens[index + 2:index + 2 + count]))
+            index += 2 + count
+        elif token == "}":
+            stack.pop()
+            index += 1
+        elif token == "MOTION":
+            break
+        else:
+            index += 1
+
+    while index < len(tokens) and tokens[index] != "Time:":
+        index += 1
+    index += 2  # skip "Time:" and the frame time value
+    width = sum(len(c) for _, c in channels)
+    values = [float(v) for v in tokens[index:]]
+    frames = [values[i:i + width] for i in range(0, len(values) - width + 1, width)]
+
+    mapping = json.loads(Path(json_path).read_text(encoding="utf-8"))["framemapping"]
+    names = {name: i for i, name in enumerate(mapping)}
+    if len(frames) < len(mapping):
+        raise HumanDataError(
+            "{} has {} frames but {} names them".format(bvh_path, len(frames), len(mapping))
+        )
+    return PoseUnits(names, channels, frames, names.get("Rest", 0))
+
+
+# Speech shapes, built from the units the pack ships. Not a standard: these are
+# a starting set to be judged by looking, and refined the same way everything
+# else here was.
+VISEMES = {
+    "rest": {},
+    "AA": {"JawDrop": 0.85, "lowerLipDown": 0.25},
+    "EE": {"MouthLeftPullSide": 0.75, "MouthRightPullSide": 0.75, "JawDrop": 0.18},
+    "OO": {"LipsKiss": 0.90, "JawDrop": 0.28},
+    "MM": {"UpperLipUp": -0.10, "lowerLipUp": 0.20},
+    "FV": {"lowerLipUp": 0.55, "UpperLipBackward": 0.35, "JawDrop": 0.10},
+    "LL": {"JawDrop": 0.45, "TongueUp": 0.70, "TonguePointUp": 0.45},
+}

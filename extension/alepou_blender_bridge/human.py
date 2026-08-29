@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import bpy
-from mathutils import Vector
+from mathutils import Euler, Vector
 
 from . import human_data
 from .human_data import HumanDataError
@@ -1152,3 +1152,48 @@ def apply_proxy_material(fitted: Any, mhclo: str | Path) -> Any | None:
     fitted.data.materials.clear()
     fitted.data.materials.append(material)
     return material
+
+
+# --- Face animation -----------------------------------------------------------
+
+
+def load_face_poses(resource_dir: str | Path | None = None) -> Any:
+    resource_dir = Path(resource_dir or default_resource_dir())
+    return human_data.load_pose_units(
+        resource_dir / "poseunits" / "face-poseunits.bvh",
+        resource_dir / "poseunits" / "face-poseunits.json",
+    )
+
+
+def apply_face_pose(armature: Any, poses: Any, weights: dict[str, float]) -> int:
+    """Set the armature to a weighted blend of named face pose units.
+
+    Speech is not a special case here: a viseme is a blend like any other, so
+    the same call drives a mouth shape, a blink and an eyebrow raise.
+    """
+    if armature.type != "ARMATURE":
+        raise HumanDataError("{} is not an armature".format(armature.name))
+    rotations = poses.blend(weights)
+    touched = 0
+    for bone in armature.pose.bones:
+        angles = rotations.get(bone.name)
+        if angles is None:
+            continue
+        bone.rotation_mode = "XYZ"
+        bone.rotation_euler = Euler(angles, "XYZ")
+        touched += 1
+    return touched
+
+
+def clear_face_pose(armature: Any) -> None:
+    for bone in armature.pose.bones:
+        bone.rotation_mode = "XYZ"
+        bone.rotation_euler = Euler((0.0, 0.0, 0.0), "XYZ")
+
+
+def key_face_pose(armature: Any, poses: Any, weights: dict[str, float], frame: int) -> int:
+    """Pose and keyframe, so a sequence of visemes becomes an animation."""
+    touched = apply_face_pose(armature, poses, weights)
+    for bone in armature.pose.bones:
+        bone.keyframe_insert(data_path="rotation_euler", frame=frame)
+    return touched

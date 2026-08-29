@@ -378,6 +378,49 @@ def main():
     obj.shape_key_remove(tall)
     bpy.context.view_layer.update()
 
+    print("face pose units")
+    poses = human.load_face_poses(PACK)
+    check("60 pose units load", len(poses.names) == 60, len(poses.names))
+    check("Rest is present", "Rest" in poses.names)
+    for unit in ("JawDrop", "LipsKiss", "MouthLeftPullSide", "TongueUp"):
+        check("pose unit {} exists".format(unit), unit in poses.names)
+    check("163 channel groups", len(poses.channels) == 163, len(poses.channels))
+    # Every bone the BVH animates must exist in the rig, or a pose silently
+    # does nothing. Checked rather than assumed.
+    skeleton = human_data.load_skeleton(PACK / "rigs" / "default.mhskel")
+    rig_bones = set(skeleton["bones"].keys())
+    bvh_bones = {bone for bone, _ in poses.channels if bone != "__end__"}
+    check("every animated bone is in the rig", bvh_bones <= rig_bones,
+          sorted(bvh_bones - rig_bones)[:5])
+
+    rest = poses.rotations("Rest")
+    check("Rest is neutral", not rest, len(rest))
+    jaw = poses.rotations("JawDrop")
+    check("JawDrop moves the jaw", "jaw" in jaw, sorted(jaw)[:6])
+    # The noise floor is the difference between posing the face and dragging
+    # the whole skeleton along with it.
+    check("JawDrop is a local change", len(jaw) < 40, len(jaw))
+    # The capture noise is sub-0.01 degrees, so the bone count is identical
+    # anywhere from 0.01 to 1.0 and the chosen 0.35 sits in a wide plateau.
+    # Only floor=0 lets the noise through.
+    check("no floor lets capture noise through",
+          len(poses.rotations("JawDrop", floor=0.0)) > len(jaw),
+          (len(poses.rotations("JawDrop", floor=0.0)), len(jaw)))
+    check("the floor sits on a plateau",
+          len(poses.rotations("JawDrop", floor=0.01)) == len(jaw)
+          == len(poses.rotations("JawDrop", floor=1.0)))
+
+    blended = poses.blend({"JawDrop": 0.5, "LipsKiss": 0.5})
+    check("a blend touches both units' bones",
+          len(blended) >= len(poses.rotations("LipsKiss")))
+    half = poses.blend({"JawDrop": 0.5})
+    full = poses.rotations("JawDrop")
+    check("weighting scales the rotation",
+          abs(half["jaw"][0] - full["jaw"][0] * 0.5) < 1e-9)
+    check("every viseme names real units",
+          all(u in poses.names for w in human_data.VISEMES.values() for u in w),
+          [u for w in human_data.VISEMES.values() for u in w if u not in poses.names])
+
     print("proxy materials")
     mhclo = PACK / "eyes" / "high-poly" / "high-poly.mhclo"
     proxy = human_data.load_proxy(mhclo)
