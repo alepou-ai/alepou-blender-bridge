@@ -206,6 +206,52 @@ def main():
     obj.modifiers.remove(mask)
     obj.modifiers.remove(subsurf)
 
+    print("landmarks")
+    points = human.landmarks(obj, PACK)
+    check("landmark set derived", len(points) >= 15, len(points))
+    for name in ("pronasale", "nasion", "glabella", "menton", "stomion",
+                 "zygion_left", "zygion_right", "pupil_left", "pupil_right"):
+        check("landmark {} present".format(name), name in points)
+
+    if {"glabella", "nasion", "pronasale", "menton", "subnasale"} <= set(points):
+        check("glabella sits above nasion",
+              points["glabella"].z > points["nasion"].z,
+              "{:.3f} vs {:.3f}".format(points["glabella"].z, points["nasion"].z))
+        check("nasion sits above the nose tip",
+              points["nasion"].z > points["pronasale"].z)
+        check("nose tip is the most forward face point",
+              points["pronasale"].y < min(points[n].y for n in
+                                          ("glabella", "subnasale", "menton", "stomion")))
+        check("menton is the lowest landmark",
+              points["menton"].z == min(p.z for p in points.values()))
+
+    if {"zygion_left", "zygion_right"} <= set(points):
+        check("zygion straddles the midline",
+              points["zygion_left"].x < 0 < points["zygion_right"].x)
+
+    proportions = human.measure(obj, PACK)
+    check("measure returns ratios", bool(proportions["ratiosToInterpupillary"]),
+          proportions["ratiosToInterpupillary"])
+    check("bizygomatic is wider than interpupillary",
+          proportions["ratiosToInterpupillary"].get("bizygomatic", 0) > 1.0,
+          proportions["ratiosToInterpupillary"].get("bizygomatic"))
+
+    # Landmarks must track morphs, or they measure the rest pose forever.
+    widen = obj.data.shape_keys.key_blocks.get("head-scale-horiz-incr")
+    if widen is None:
+        widen = human.add_morph(obj, PACK / "targets" / "head" / "head-scale-horiz-incr.target")
+    widen.slider_max = 1.0
+    widen.value = 1.0
+    bpy.context.view_layer.update()
+    widened = human.measure(obj, PACK)
+    check("widening the head changes the measured ratio",
+          abs(widened["ratiosToInterpupillary"].get("bizygomatic", 0)
+              - proportions["ratiosToInterpupillary"].get("bizygomatic", 0)) > 1e-3,
+          "{} -> {}".format(proportions["ratiosToInterpupillary"].get("bizygomatic"),
+                            widened["ratiosToInterpupillary"].get("bizygomatic")))
+    widen.value = 0.0
+    bpy.context.view_layer.update()
+
     print("topology guard")
     signature = human.verify_topology(obj)
     check("verify passes on canonical mesh", bool(signature))

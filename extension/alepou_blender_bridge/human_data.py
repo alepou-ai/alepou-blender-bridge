@@ -390,3 +390,120 @@ def makehuman_to_blender(position: tuple[float, float, float]) -> tuple[float, f
     """MakeHuman space back to Blender space."""
     mx, my, mz = position
     return (mx * UNIT_SCALE, -mz * UNIT_SCALE, my * UNIT_SCALE)
+
+
+# --- Named landmarks ----------------------------------------------------------
+#
+# Derived geometrically from the region vertex sets rather than hand-picked, so
+# they can be regenerated when the pack changes and every definition is written
+# down rather than asserted. Coordinates here are Blender space: +X to the
+# subject's right in world terms, -Y forward (the face direction), +Z up.
+#
+# Silhouette matching was considered instead and rejected for frontal views: a
+# real head's outline is mostly hair, which this substrate does not have, so the
+# model outline and the photograph outline are not the same curve. Landmarks
+# compare like with like.
+
+MIDLINE_TOLERANCE = 0.006
+
+# How far below the crown a facial landmark may sit, in metres.
+HEAD_BAND_DEPTH = 0.30
+
+
+def _pick(coords, indices, key, want_max):
+    best = None
+    best_value = None
+    for index in indices:
+        value = key(coords[index])
+        if best_value is None or (value > best_value if want_max else value < best_value):
+            best, best_value = index, value
+    return best
+
+
+def _midline(coords, indices, tolerance=MIDLINE_TOLERANCE):
+    near = [i for i in indices if abs(coords[i][0]) <= tolerance]
+    return near or list(indices)
+
+
+def derive_landmarks(
+    coords: list[tuple[float, float, float]], regions: dict[str, Iterable[int]]
+) -> dict[str, Any]:
+    """Locate named anthropometric points from region membership and geometry.
+
+    Each landmark records the rule that found it, so a reader can judge whether
+    the definition is the one they meant rather than trusting a bare index.
+    """
+    # Category membership alone is not enough. A morph category can touch a
+    # stray vertex far from its own anatomy - the cheek set reaches one down the
+    # body - and helper geometry sits inside several face regions, which put an
+    # early glabella on the hair helper. Constrain candidates to real body
+    # vertices inside the head band before choosing any extreme.
+    body_top = max(coords[i][2] for i in range(0, min(BODY_VERTEX_RANGE[1] + 1, len(coords))))
+    head_floor = body_top - HEAD_BAND_DEPTH
+
+    def region(name):
+        return [
+            index
+            for index in regions.get(name, [])
+            if index <= BODY_VERTEX_RANGE[1] and coords[index][2] >= head_floor
+        ]
+
+    nose, chin, mouth = region("nose"), region("chin"), region("mouth")
+    cheek, forehead, ears = region("cheek"), region("forehead"), region("ears")
+
+    rules: list[tuple[str, list[int], Any, bool, str]] = [
+        # -Y is forward, so the most forward point is the minimum y.
+        ("pronasale", _midline(coords, nose), lambda c: c[1], False, "most forward nose vertex on the midline"),
+        ("nasion", _midline(coords, nose), lambda c: c[2], True, "highest nose vertex on the midline"),
+        ("subnasale", _midline(coords, nose), lambda c: c[2], False, "lowest nose vertex on the midline"),
+        ("glabella", _midline(coords, forehead), lambda c: c[1], False, "most forward forehead vertex on the midline"),
+        ("menton", _midline(coords, chin), lambda c: c[2], False, "lowest chin vertex on the midline"),
+        ("pogonion", _midline(coords, chin), lambda c: c[1], False, "most forward chin vertex on the midline"),
+        ("cheilion_left", mouth, lambda c: c[0], False, "leftmost mouth vertex, viewer left"),
+        ("cheilion_right", mouth, lambda c: c[0], True, "rightmost mouth vertex, viewer right"),
+        ("zygion_left", cheek, lambda c: c[0], False, "leftmost cheek vertex, viewer left"),
+        ("zygion_right", cheek, lambda c: c[0], True, "rightmost cheek vertex, viewer right"),
+        ("gonion_left", chin, lambda c: c[0], False, "leftmost jaw vertex, viewer left"),
+        ("gonion_right", chin, lambda c: c[0], True, "rightmost jaw vertex, viewer right"),
+        ("tragion_left", ears, lambda c: c[0], False, "leftmost ear vertex, viewer left"),
+        ("tragion_right", ears, lambda c: c[0], True, "rightmost ear vertex, viewer right"),
+    ]
+
+    landmarks: dict[str, Any] = {}
+    for name, indices, key, want_max, description in rules:
+        if not indices:
+            continue
+        chosen = _pick(coords, indices, key, want_max)
+        if chosen is None:
+            continue
+        landmarks[name] = {
+            "vertex": int(chosen),
+            "rule": description,
+            "restPosition": [round(float(v), 5) for v in coords[chosen]],
+        }
+
+    # Stomion sits between the lip corners rather than at an extreme of anything.
+    if "cheilion_left" in landmarks and "cheilion_right" in landmarks and mouth:
+        height = (
+            coords[landmarks["cheilion_left"]["vertex"]][2]
+            + coords[landmarks["cheilion_right"]["vertex"]][2]
+        ) / 2.0
+        chosen = _pick(coords, _midline(coords, mouth), lambda c: abs(c[2] - height), False)
+        if chosen is not None:
+            landmarks["stomion"] = {
+                "vertex": int(chosen),
+                "rule": "midline mouth vertex nearest the height of the lip corners",
+                "restPosition": [round(float(v), 5) for v in coords[chosen]],
+            }
+    return landmarks
+
+
+LANDMARK_PAIRS = {
+    "interpupillary": ("pupil_left", "pupil_right"),
+    "bizygomatic": ("zygion_left", "zygion_right"),
+    "bigonial": ("gonion_left", "gonion_right"),
+    "mouthWidth": ("cheilion_left", "cheilion_right"),
+    "noseHeight": ("nasion", "subnasale"),
+    "lowerFaceHeight": ("subnasale", "menton"),
+    "faceHeight": ("nasion", "menton"),
+}

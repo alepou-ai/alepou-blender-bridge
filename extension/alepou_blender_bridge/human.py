@@ -623,3 +623,69 @@ def eye_centres(obj: Any) -> tuple[Any, Any]:
     # the image. Returned in viewer order - image-left first - to match the
     # normalised image coordinates the reference module works in.
     return (centre(left), centre(right))
+
+
+def landmarks(obj: Any, resource_dir: str | Path | None = None) -> dict[str, Any]:
+    """Named landmark positions on the current, morphed mesh.
+
+    The same names can be marked on a photograph, so model and reference are
+    measured with one vocabulary instead of two sets of ad-hoc extents. The
+    ad-hoc version is what made the t-939 comparison wrong: the model's face
+    width included its ears and the photograph's did not.
+    """
+    import json
+
+    obj = _mesh_object(obj)
+    resource_dir = Path(resource_dir or obj.get(RESOURCE_PROPERTY, "") or default_resource_dir())
+    anatomy_path = resource_dir / "anatomy.json"
+    if not anatomy_path.is_file():
+        raise HumanDataError("No anatomy map at {}".format(anatomy_path))
+
+    anatomy = json.loads(anatomy_path.read_text(encoding="utf-8"))
+    defined = anatomy.get("landmarks")
+    if not defined:
+        raise HumanDataError(
+            "{} has no landmarks; regenerate it with scripts/build_landmarks.py".format(anatomy_path)
+        )
+
+    coords = morphed_coordinates(obj)
+    found: dict[str, Any] = {}
+    for name, entry in defined.items():
+        index = entry.get("vertex")
+        if isinstance(index, int) and 0 <= index < len(coords):
+            found[name] = Vector(coords[index])
+
+    # The pupils are the eye proxy centres, not a base-mesh vertex.
+    try:
+        left, right = eye_centres(obj)
+        found["pupil_left"], found["pupil_right"] = left, right
+    except HumanDataError:
+        pass
+    return found
+
+
+def measure(obj: Any, resource_dir: str | Path | None = None) -> dict[str, Any]:
+    """Dimensionless proportions from the named landmarks.
+
+    Ratios only. A photograph carries no scale, so absolute millimetres cannot be
+    compared against one; ratios and angles can.
+    """
+    points = landmarks(obj, resource_dir)
+    distances: dict[str, float] = {}
+    for name, (a, b) in human_data.LANDMARK_PAIRS.items():
+        if a in points and b in points:
+            distances[name] = float((points[a] - points[b]).length)
+
+    baseline = distances.get("interpupillary")
+    ratios = {}
+    if baseline and baseline > 1e-9:
+        ratios = {
+            name: round(value / baseline, 4)
+            for name, value in distances.items()
+            if name != "interpupillary"
+        }
+    return {
+        "distances_m": {k: round(v, 5) for k, v in distances.items()},
+        "ratiosToInterpupillary": ratios,
+        "landmarksFound": sorted(points),
+    }
