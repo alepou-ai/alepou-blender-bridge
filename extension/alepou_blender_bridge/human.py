@@ -438,6 +438,7 @@ def describe(obj: Any) -> dict[str, Any]:
 EYE_OBJECT_NAME = "AlepouHumanEyes"
 PROXY_SOURCE_PROPERTY = "alepou_proxy_source"
 PROXY_HOST_PROPERTY = "alepou_proxy_host"
+MATERIAL_SOURCE_PROPERTY = "alepou_material_source"
 
 
 def _read_obj(path: Path) -> tuple[list[list[int]], list[tuple[float, float]], list[list[int]]]:
@@ -513,7 +514,31 @@ def add_proxy(
     mesh.from_pydata(coords, [], faces)
     mesh.validate(verbose=False)
 
+    # UVs FIRST, while polygon order still matches the obj. The bmesh pass
+    # below rewrites the mesh, and assigning UVs after it silently wrote each
+    # face's coordinates onto some other face: one eyeball came out correct and
+    # the other with its iris smeared to the side, which looked like a texture
+    # problem and was a bookkeeping one.
+    if len(mesh.polygons) != len(faces):
+        raise HumanDataError(
+            "{}: validate() dropped {} faces, so UVs cannot be trusted".format(
+                mhclo.name, len(faces) - len(mesh.polygons)
+            )
+        )
+    if uvs and any(i >= 0 for loop in uv_loops for i in loop):
+        layer = mesh.uv_layers.new(name="UVMap")
+        for polygon, loop_uv in zip(mesh.polygons, uv_loops):
+            for slot, uv_index in zip(polygon.loop_indices, loop_uv):
+                if 0 <= uv_index < len(uvs):
+                    layer.data[slot].uv = uvs[uv_index]
+
+    # Smooth by default. A fitted eyeball is a sphere of a few hundred faces
+    # and rendered flat it reads as a cut gemstone, which is exactly how it
+    # looked for as long as it was also rendering untextured white.
+    mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+
     # from_pydata trusts the obj winding, which is not guaranteed consistent.
+    # bmesh carries the UV layer through, so doing this second is safe.
     import bmesh
 
     bm = bmesh.new()
@@ -521,13 +546,6 @@ def add_proxy(
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.to_mesh(mesh)
     bm.free()
-
-    if uvs and any(i >= 0 for loop in uv_loops for i in loop):
-        layer = mesh.uv_layers.new(name="UVMap")
-        for polygon, loop_uv in zip(mesh.polygons, uv_loops):
-            for slot, uv_index in zip(polygon.loop_indices, loop_uv):
-                if 0 <= uv_index < len(uvs):
-                    layer.data[slot].uv = uvs[uv_index]
     mesh.update()
 
     fitted_object = bpy.data.objects.new(name, mesh)
@@ -535,6 +553,8 @@ def add_proxy(
     fitted_object[PROXY_HOST_PROPERTY] = obj.name
     (collection or bpy.context.scene.collection).objects.link(fitted_object)
     fitted_object.parent = obj
+
+    apply_proxy_material(fitted_object, mhclo)
 
     if hide_envelope:
         # The envelope has done its job; showing it too would double the
@@ -1039,4 +1059,83 @@ def apply_skin(
 
     if material.name not in [slot.name for slot in obj.data.materials if slot]:
         obj.data.materials.append(material)
+    return material
+
+
+def build_material(definition: Any, *, name: str | None = None) -> Any:
+    """A Blender material from a parsed .mhmat.
+
+    Two flags on the vendored eye material are load-bearing and were worked out
+    by hand before this existed: ``transparent`` and ``backfaceCull``. Honour
+    only the first and the eyeball renders as a dark lens, because the far
+    inside of the sphere shows through the cornea. Honour neither and the
+    texture's cutout alpha is ignored and the socket reads as empty.
+    """
+    name = name or "Alepou_{}".format(definition.name)
+    material = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+    material.use_nodes = True
+    tree = material.node_tree
+    tree.nodes.clear()
+
+    principled = tree.nodes.new("ShaderNodeBsdfPrincipled")
+    principled.location = (-300, 0)
+    output = tree.nodes.new("ShaderNodeOutputMaterial")
+    output.location = (0, 0)
+    tree.links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    diffuse = definition.colours.get("diffuseColor", (0.8, 0.8, 0.8))
+    principled.inputs["Base Color"].default_value = (*diffuse, 1.0)
+    emissive = definition.colours.get("emissiveColor")
+    if emissive and any(emissive):
+        principled.inputs["Emission Color"].default_value = (*emissive, 1.0)
+        principled.inputs["Emission Strength"].default_value = 1.0
+
+    # MakeHuman shininess runs 0..1 with 1 glossy; Blender roughness is the
+    # other way round and never wants to be exactly zero.
+    shininess = definition.numbers.get("shininess", 0.5)
+    principled.inputs["Roughness"].default_value = max(0.06, 1.0 - shininess * 0.9)
+    opacity = definition.numbers.get("opacity", 1.0)
+
+    texture_path = definition.texture_path("diffuseTexture")
+    if texture_path and texture_path.is_file():
+        image = bpy.data.images.get(texture_path.name)
+        if image is None or image.filepath != str(texture_path):
+            image = bpy.data.images.load(str(texture_path), check_existing=True)
+        node = tree.nodes.new("ShaderNodeTexImage")
+        node.image = image
+        node.location = (-700, 0)
+        tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
+        if definition.flags.get("transparent") or opacity < 1.0:
+            tree.links.new(node.outputs["Alpha"], principled.inputs["Alpha"])
+    elif texture_path:
+        raise HumanDataError("{} names a missing texture {}".format(
+            definition.path, texture_path))
+
+    if opacity < 1.0 and not texture_path:
+        principled.inputs["Alpha"].default_value = opacity
+
+    if definition.flags.get("transparent"):
+        # alphaToCoverage is a cutout, which dithered handles without the
+        # sorting artefacts blended transparency brings.
+        method = "DITHERED" if definition.flags.get("alphaToCoverage") else "BLENDED"
+        if hasattr(material, "surface_render_method"):
+            material.surface_render_method = method
+        elif hasattr(material, "blend_method"):
+            material.blend_method = "HASHED" if method == "DITHERED" else "BLEND"
+    material.use_backface_culling = bool(definition.flags.get("backfaceCull"))
+    material[MATERIAL_SOURCE_PROPERTY] = str(definition.path)
+    return material
+
+
+def apply_proxy_material(fitted: Any, mhclo: str | Path) -> Any | None:
+    """Give a fitted proxy the material its .mhclo names, if it names one."""
+    proxy = human_data.load_proxy(Path(mhclo))
+    if not proxy.material:
+        return None
+    path = (Path(mhclo).parent / proxy.material).resolve()
+    if not path.is_file():
+        raise HumanDataError("{} names a missing material {}".format(mhclo, path))
+    material = build_material(human_data.load_material(path))
+    fitted.data.materials.clear()
+    fitted.data.materials.append(material)
     return material

@@ -378,6 +378,40 @@ def main():
     obj.shape_key_remove(tall)
     bpy.context.view_layer.update()
 
+    print("proxy materials")
+    mhclo = PACK / "eyes" / "high-poly" / "high-poly.mhclo"
+    proxy = human_data.load_proxy(mhclo)
+    check("the eye proxy names a material", proxy.material == "../materials/brown.mhmat",
+          proxy.material)
+    definition = human_data.load_material((mhclo.parent / proxy.material).resolve())
+    check("material parses a name", definition.name == "Eye_brown", definition.name)
+    check("material parses a diffuse texture",
+          definition.textures.get("diffuseTexture") == "brown_eye.png")
+    check("material texture resolves on disk", definition.texture_path().is_file())
+    # Both of these had to be honoured before the eye stopped rendering as a
+    # dark lens or an empty socket when this was worked out by hand.
+    check("material records transparent", definition.flags.get("transparent") is True)
+    check("material records backfaceCull", definition.flags.get("backfaceCull") is True)
+    check("material ignores the GLSL shader block rather than guessing",
+          any(k.startswith("shader") for k in definition.shader))
+
+    built = human.build_material(definition, name="SmokeEyeMaterial")
+    check("built material uses nodes", built.use_nodes)
+    check("built material culls backfaces", built.use_backface_culling is True)
+    check("built material loads the image",
+          any(n.type == "TEX_IMAGE" and n.image for n in built.node_tree.nodes))
+    links = built.node_tree.links
+    check("texture colour drives base colour",
+          any(l.to_socket.name == "Base Color" for l in links))
+    check("texture alpha drives alpha", any(l.to_socket.name == "Alpha" for l in links))
+
+    eyes_obj = bpy.data.objects.get(human.EYE_OBJECT_NAME) or human.add_eyes(obj, PACK)
+    check("fitted eyes carry a material", len(eyes_obj.data.materials) == 1,
+          len(eyes_obj.data.materials))
+    check("fitted eyes have UVs", len(eyes_obj.data.uv_layers) == 1)
+    check("fitted eyes are smooth shaded",
+          all(p.use_smooth for p in eyes_obj.data.polygons))
+
     print("skin")
     coords = human.morphed_coordinates(obj)
     frame = human_data.head_frame(coords)

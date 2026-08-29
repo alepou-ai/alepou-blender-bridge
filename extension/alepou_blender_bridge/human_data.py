@@ -763,3 +763,77 @@ def skin_tones(
         shift = _jitter(index, mottling)
         tones.append(tuple(max(0.0, min(1.0, c + shift)) for c in tone))
     return tones
+
+
+# --- Materials ----------------------------------------------------------------
+#
+# Every .mhclo names a material and load_proxy has always parsed that name.
+# Nothing ever used it, so fitted proxies rendered untextured - the eyes came
+# out as plain white spheres, which was mistaken for a morph problem for
+# several rounds before anyone checked.
+
+MATERIAL_COLOURS = ("ambientColor", "diffuseColor", "specularColor", "emissiveColor")
+MATERIAL_NUMBERS = ("shininess", "opacity", "translucency")
+MATERIAL_FLAGS = (
+    "shadeless", "wireframe", "transparent", "alphaToCoverage",
+    "backfaceCull", "depthless", "castShadows", "receiveShadows",
+)
+MATERIAL_TEXTURES = ("diffuseTexture", "bumpmapTexture", "normalmapTexture", "specularTexture")
+
+
+class MaterialDefinition:
+    """A parsed .mhmat.
+
+    MakeHuman's shader/shaderParam/shaderConfig lines describe its own GLSL
+    pipeline and do not translate; they are recorded verbatim and otherwise
+    ignored rather than guessed at.
+    """
+
+    __slots__ = ("name", "path", "colours", "numbers", "flags", "textures", "shader")
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.name = path.stem
+        self.colours: dict[str, tuple[float, float, float]] = {}
+        self.numbers: dict[str, float] = {}
+        self.flags: dict[str, bool] = {}
+        self.textures: dict[str, str] = {}
+        self.shader: dict[str, str] = {}
+
+    def texture_path(self, kind: str = "diffuseTexture") -> Path | None:
+        name = self.textures.get(kind)
+        return (self.path.parent / name).resolve() if name else None
+
+
+def load_material(path: str | Path) -> MaterialDefinition:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise HumanDataError("Cannot read material {}: {}".format(path, error)) from error
+
+    material = MaterialDefinition(path)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        key, values = parts[0], parts[1:]
+        if not values:
+            continue
+        try:
+            if key in MATERIAL_COLOURS and len(values) >= 3:
+                material.colours[key] = (float(values[0]), float(values[1]), float(values[2]))
+            elif key in MATERIAL_NUMBERS:
+                material.numbers[key] = float(values[0])
+            elif key in MATERIAL_FLAGS:
+                material.flags[key] = values[0].lower() == "true"
+            elif key in MATERIAL_TEXTURES:
+                material.textures[key] = values[0]
+            elif key == "name":
+                material.name = " ".join(values)
+            elif key.startswith("shader"):
+                material.shader[" ".join([key] + values[:-1])] = values[-1]
+        except ValueError as error:
+            raise HumanDataError("{}: bad value on {!r}: {}".format(path, line, error)) from error
+    return material
