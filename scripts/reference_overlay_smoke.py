@@ -112,6 +112,35 @@ def main():
           reference.image_pixels(reference.load_image(written[0])).shape[:2] == (height, width),
           reference.image_pixels(reference.load_image(written[0])).shape[:2])
 
+    print("eye-anchored alignment")
+    left_eye, right_eye = human.eye_centres(obj)
+    check("eyes separate by side", left_eye.x < 0 < right_eye.x,
+          "{:.3f} / {:.3f}".format(left_eye.x, right_eye.x))
+
+    target_left, target_right = (0.40, 0.44), (0.60, 0.44)
+    report = reference.align_camera_to_pair(
+        scene, camera, left_eye, right_eye, target_left, target_right)
+    check("alignment converges", report["converged"],
+          "sep={:.5f} mid={:.5f}".format(report["separationError"], report["midpointError"]))
+
+    landed_left = reference.project(scene, camera, left_eye)
+    landed_right = reference.project(scene, camera, right_eye)
+    check("left eye lands on target",
+          abs(landed_left[0] - target_left[0]) < 5e-3 and abs(landed_left[1] - target_left[1]) < 5e-3,
+          landed_left)
+    check("right eye lands on target",
+          abs(landed_right[0] - target_right[0]) < 5e-3 and abs(landed_right[1] - target_right[1]) < 5e-3,
+          landed_right)
+    check("alignment says what it leaves unsolved", "unsolved" in report["note"])
+
+    coincident = False
+    try:
+        reference.align_camera_to_pair(
+            scene, camera, left_eye, right_eye, (0.5, 0.5), (0.5, 0.5))
+    except ReferenceError:
+        coincident = True
+    check("coincident targets rejected", coincident)
+
     print("guards")
     rejected = False
     try:

@@ -277,3 +277,121 @@ def alignment_report(
             "error. Use them to compare two attempts, not as a fitting objective."
         ),
     }
+
+
+# --- Aligning the render to the reference ------------------------------------
+
+
+def project(scene: Any, camera: Any, world_position: Any) -> tuple[float, float]:
+    """Where a world point lands in the image, normalised with (0,0) top-left."""
+    from bpy_extras.object_utils import world_to_camera_view
+
+    projected = world_to_camera_view(scene, camera, world_position)
+    return (float(projected.x), 1.0 - float(projected.y))
+
+
+def _separation(a: tuple[float, float], b: tuple[float, float], aspect: float) -> float:
+    dx = (b[0] - a[0]) * aspect
+    dy = b[1] - a[1]
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def align_camera_to_pair(
+    scene: Any,
+    camera: Any,
+    world_a: Any,
+    world_b: Any,
+    target_a: tuple[float, float],
+    target_b: tuple[float, float],
+    *,
+    iterations: int = 8,
+) -> dict[str, Any]:
+    """Match two known points to where they appear in the reference.
+
+    Two correspondences pin scale, image translation and roll. Distance is moved
+    along the view axis until the projected separation matches, and camera shift
+    until the projected midpoint matches. Yaw, pitch and focal length are left
+    alone, so this aligns rather than fits - see the pose solve for those.
+
+    The shift derivatives are measured rather than reasoned about. Blender's
+    shift sign and its interaction with sensor fit are easy to get backwards, and
+    a two-sample numerical derivative removes the question entirely.
+    """
+    from mathutils import Vector
+
+    world_a = Vector(world_a)
+    world_b = Vector(world_b)
+    render = scene.render
+    aspect = (render.resolution_x * render.pixel_aspect_x) / max(
+        1e-9, render.resolution_y * render.pixel_aspect_y
+    )
+
+    target_separation = _separation(target_a, target_b, aspect)
+    if target_separation < 1e-6:
+        raise ReferenceError("The two reference points coincide; cannot derive a scale")
+    target_mid = ((target_a[0] + target_b[0]) / 2.0, (target_a[1] + target_b[1]) / 2.0)
+
+    pivot = (world_a + world_b) / 2.0
+    history: list[dict[str, float]] = []
+
+    for _ in range(max(1, iterations)):
+        projected_a = project(scene, camera, world_a)
+        projected_b = project(scene, camera, world_b)
+        separation = _separation(projected_a, projected_b, aspect)
+        if separation < 1e-9:
+            raise ReferenceError("The subject projects to a single point; check the camera")
+
+        # Scale: move along the view axis. Halving the distance roughly doubles
+        # the projected size, so damp the step and iterate rather than jumping.
+        ratio = target_separation / separation
+        direction = (camera.location - pivot)
+        distance = direction.length
+        if distance > 1e-9:
+            step = 1.0 + (1.0 / ratio - 1.0) * 0.8
+            camera.location = pivot + direction * max(0.05, step)
+        bpy.context.view_layer.update()
+
+        # Translation: measure how the projection responds to shift, then solve.
+        before = project(scene, camera, pivot)
+        delta = 0.02
+        camera.data.shift_x += delta
+        bpy.context.view_layer.update()
+        after_x = project(scene, camera, pivot)
+        camera.data.shift_x -= delta
+
+        camera.data.shift_y += delta
+        bpy.context.view_layer.update()
+        after_y = project(scene, camera, pivot)
+        camera.data.shift_y -= delta
+        bpy.context.view_layer.update()
+
+        dudx = (after_x[0] - before[0]) / delta
+        dvdy = (after_y[1] - before[1]) / delta
+        if abs(dudx) > 1e-6:
+            camera.data.shift_x += (target_mid[0] - before[0]) / dudx
+        if abs(dvdy) > 1e-6:
+            camera.data.shift_y += (target_mid[1] - before[1]) / dvdy
+        bpy.context.view_layer.update()
+
+        projected_a = project(scene, camera, world_a)
+        projected_b = project(scene, camera, world_b)
+        mid = ((projected_a[0] + projected_b[0]) / 2.0, (projected_a[1] + projected_b[1]) / 2.0)
+        history.append({
+            "separationError": abs(_separation(projected_a, projected_b, aspect) - target_separation),
+            "midpointError": ((mid[0] - target_mid[0]) ** 2 + (mid[1] - target_mid[1]) ** 2) ** 0.5,
+        })
+
+    final = history[-1]
+    return {
+        "separationError": final["separationError"],
+        "midpointError": final["midpointError"],
+        "iterations": len(history),
+        "cameraDistance": float((camera.location - pivot).length),
+        "shift": [float(camera.data.shift_x), float(camera.data.shift_y)],
+        "converged": final["separationError"] < 5e-3 and final["midpointError"] < 5e-3,
+        "note": (
+            "Scale, translation and roll only. Yaw, pitch and focal length are "
+            "unsolved, so residual disagreement may still be projection rather "
+            "than subject."
+        ),
+    }

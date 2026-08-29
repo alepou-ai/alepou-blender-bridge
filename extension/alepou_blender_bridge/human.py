@@ -588,3 +588,37 @@ def hide_group(obj: Any, group_name: str, *, name: str | None = None) -> Any:
     modifier.vertex_group = group_name
     modifier.invert_vertex_group = True
     return modifier
+
+
+def eye_centres(obj: Any) -> tuple[Any, Any]:
+    """World-space centres of the left and right eyes, as (viewer_left, viewer_right).
+
+    Split by side rather than by vertex index range, so it keeps working if the
+    pack's group layout ever changes.
+    """
+    obj = _mesh_object(obj)
+    group = obj.vertex_groups.get("alepou_eyes")
+    if group is None:
+        raise HumanDataError("Object has no alepou_eyes group; load it with load_human")
+
+    matrix = obj.matrix_world
+    left: list[Any] = []
+    right: list[Any] = []
+    for vertex in obj.data.vertices:
+        if not any(g.group == group.index for g in vertex.groups):
+            continue
+        position = matrix @ vertex.co
+        (left if position.x < 0 else right).append(position)
+
+    if not left or not right:
+        raise HumanDataError("Could not separate the eyes by side")
+
+    def centre(points):
+        total = Vector((0.0, 0.0, 0.0))
+        for point in points:
+            total += point
+        return total / len(points)
+
+    # A character faces -Y, so its own left eye is at +X and appears on the
+    # viewer's left at -X. Return in viewer order to match image coordinates.
+    return (centre(left), centre(right))
