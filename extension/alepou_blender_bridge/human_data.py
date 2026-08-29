@@ -605,3 +605,161 @@ def barycentric(
     w2 = (d11 * d20 - d01 * d21) / denominator
     w3 = (d00 * d21 - d01 * d20) / denominator
     return (1.0 - w2 - w3, w2, w3)
+
+
+# --- Skin -------------------------------------------------------------------
+#
+# There is no skin texture and there cannot easily be one: load_human ignores
+# the UVs in base.obj, so the body mesh carries no UV layer, and MakeHuman's own
+# skins live in the per-asset-licensed community library rather than in the CC0
+# core. Both problems have the same answer - build the tone from anatomy as a
+# per-vertex colour on the fixed topology, which is the same contract every
+# morph and every proxy already uses, and leave the micro detail to procedural
+# nodes.
+#
+# The zones are real. A face is not one colour: the classic description is
+# three bands - a more olive forehead, a redder midface across the nose and
+# cheeks where the capillary bed is dense and the skin is thin, and a cooler
+# lower third that on a male carries beard shadow whether or not he is shaved.
+
+
+def srgb_to_linear(colour: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Blender node colours are linear; skin tones are quoted in sRGB."""
+    out = []
+    for channel in colour:
+        out.append(channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4)
+    return (out[0], out[1], out[2])
+
+
+class HeadFrame:
+    """Where the head is, measured rather than assumed.
+
+    Every script that needed the nose tip found it by taking the most forward
+    vertex, and the first one to run it over the whole body found a toe: it
+    reported a nose 0.75 m below the crown. The band restriction lives here now
+    so that mistake is made once.
+    """
+
+    def __init__(self, crown: float, chin: float, nose: tuple[float, float, float],
+                 half_width: float, band: list[int]):
+        self.crown = crown
+        self.chin = chin
+        self.nose = nose
+        self.half_width = half_width
+        self.band = band
+
+    @property
+    def height(self) -> float:
+        return self.crown - self.chin
+
+
+def head_frame(coords: list[tuple[float, float, float]], depth: float = 0.26) -> HeadFrame:
+    body = range(min(BODY_VERTEX_RANGE[1] + 1, len(coords)))
+    crown = max(coords[v][2] for v in body)
+    band = [v for v in body if coords[v][2] > crown - depth]
+    nose_index = min(band, key=lambda v: coords[v][1])
+    # The chin, not the neck: taken near the midline and in front of the ears.
+    front = [v for v in band if coords[v][1] < coords[nose_index][1] + 0.06]
+    chin = min(coords[v][2] for v in front) if front else crown - depth
+    half_width = max(abs(coords[v][0]) for v in band)
+    return HeadFrame(crown, chin, coords[nose_index], half_width, band)
+
+
+def _smoothstep(t: float) -> float:
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _band(value: float, centre: float, half: float) -> float:
+    """1 at the centre, falling smoothly to 0 at +/- half."""
+    if half <= 0.0:
+        return 0.0
+    return _smoothstep(1.0 - abs(value - centre) / half)
+
+
+# sRGB. Deliberately readable so they can be argued with and edited.
+SKIN_PALETTE = {
+    "base": (0.804, 0.639, 0.549),
+    "forehead": (0.800, 0.643, 0.535),   # a shade more olive, less red
+    "midface": (0.855, 0.573, 0.482),    # nose, cheeks: dense capillary bed
+    "extremity": (0.886, 0.510, 0.427),  # nose tip and ears: thinnest skin
+    "beard": (0.667, 0.561, 0.545),      # desaturated and cooler, not grey
+    "lip": (0.714, 0.420, 0.396),
+    "body": (0.757, 0.604, 0.525),       # below the head, out of the light
+}
+
+
+def _mix(a, b, t):
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+
+def _jitter(index: int, amount: float) -> float:
+    """Deterministic per-vertex mottling. Real skin is not flat."""
+    h = (index * 2654435761) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 1274126177) & 0xFFFFFFFF
+    return ((h & 0xFFFF) / 65535.0 - 0.5) * 2.0 * amount
+
+
+def skin_tones(
+    coords: list[tuple[float, float, float]],
+    frame: HeadFrame | None = None,
+    palette: dict[str, tuple[float, float, float]] | None = None,
+    *,
+    beard: float = 0.55,
+    mottling: float = 0.012,
+) -> list[tuple[float, float, float]]:
+    """Per-vertex skin colour in linear space, from where the vertex sits.
+
+    ``beard`` is how strongly the lower third is shaded; 0 for a face with no
+    beard growth at all, which is not the same as a clean-shaven male face.
+    """
+    palette = palette or SKIN_PALETTE
+    frame = frame or head_frame(coords)
+    linear = {name: srgb_to_linear(value) for name, value in palette.items()}
+
+    nose_x, nose_y, nose_z = frame.nose
+    brow = nose_z + 0.055
+    mouth = nose_z - 0.036
+    chin_top = nose_z - 0.075
+
+    tones: list[tuple[float, float, float]] = []
+    for index, (x, y, z) in enumerate(coords):
+        if z < frame.chin - 0.02:
+            tone = linear["body"]
+        else:
+            # Vertical band: olive above the brow, red across the midface.
+            # The forehead shift has to be gentle and spread over a long ramp.
+            # A 0.06 m ramp onto a 0.23 m head still rendered as a flat lighter
+            # panel with a hard edge at the brow - a straight horizontal line
+            # across a face, which nothing in anatomy justifies.
+            upper = _smoothstep((z - brow) / 0.10)
+            mid = _band(z, nose_z + 0.005, 0.075)
+            tone = _mix(linear["base"], linear["forehead"], upper * 0.7)
+            tone = _mix(tone, linear["midface"], mid * 0.80)
+
+            # Thin skin over cartilage: the nose tip and the ears.
+            to_nose = ((x - nose_x) ** 2 + (y - nose_y) ** 2 + (z - nose_z) ** 2) ** 0.5
+            ear = _smoothstep((abs(x) - frame.half_width * 0.80) / (frame.half_width * 0.20))
+            thin = max(_smoothstep(1.0 - to_nose / 0.030), ear * _band(z, nose_z + 0.01, 0.06))
+            tone = _mix(tone, linear["extremity"], thin * 0.7)
+
+            # Beard field: below the nose, in front, inside the jaw.
+            if beard > 0.0 and z < mouth:
+                forward = _smoothstep((nose_y + 0.075 - y) / 0.03)
+                depth_in = _smoothstep((mouth - z) / 0.035)
+                spread = 1.0 - _smoothstep((abs(x) - frame.half_width * 0.55)
+                                           / (frame.half_width * 0.35))
+                tone = _mix(tone, linear["beard"], beard * forward * depth_in * spread)
+
+            # Lips.
+            lip = _band(z, mouth, 0.008) * (1.0 - _smoothstep((abs(x) - 0.018) / 0.012))
+            lip *= _smoothstep((nose_y + 0.060 - y) / 0.02)
+            tone = _mix(tone, linear["lip"], lip * 0.6)
+
+            if z < chin_top:
+                tone = _mix(tone, linear["body"], _smoothstep((chin_top - z) / 0.05) * 0.5)
+
+        shift = _jitter(index, mottling)
+        tones.append(tuple(max(0.0, min(1.0, c + shift)) for c in tone))
+    return tones

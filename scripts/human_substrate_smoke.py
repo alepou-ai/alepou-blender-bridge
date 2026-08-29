@@ -378,6 +378,82 @@ def main():
     obj.shape_key_remove(tall)
     bpy.context.view_layer.update()
 
+    print("skin")
+    coords = human.morphed_coordinates(obj)
+    frame = human_data.head_frame(coords)
+    check(
+        "head frame finds the nose in the head, not a toe",
+        frame.crown - frame.nose[2] < 0.16,
+        frame.crown - frame.nose[2],
+    )
+    check("head frame chin is below the nose", frame.chin < frame.nose[2], frame.chin)
+    check("head frame has a sane height", 0.15 < frame.height < 0.32, frame.height)
+
+    tones = human_data.skin_tones(coords, frame)
+    check("one tone per vertex", len(tones) == len(coords))
+    check(
+        "tones are in range",
+        all(0.0 <= c <= 1.0 for tone in tones for c in tone),
+    )
+
+    nx, ny, nz = frame.nose
+
+    def average(pred):
+        picked = [tones[i] for i in range(len(coords)) if pred(coords[i])]
+        return [sum(t[c] for t in picked) / len(picked) for c in range(3)] if picked else None
+
+    tip = average(lambda p: ((p[0] - nx) ** 2 + (p[1] - ny) ** 2 + (p[2] - nz) ** 2) ** 0.5 < 0.012)
+    brow = average(lambda p: nz + 0.075 < p[2] < frame.crown - 0.02 and abs(p[0]) < 0.04)
+    jaw = average(lambda p: frame.chin + 0.01 < p[2] < nz - 0.050 and abs(p[0]) < 0.05
+                  and p[1] < ny + 0.06)
+    check("every named zone has vertices", None not in (tip, brow, jaw))
+    # Thin skin over nasal cartilage is redder than the forehead. This is the
+    # check that would catch the zones being silently keyed to the wrong axis.
+    check(
+        "the nose tip is redder than the forehead",
+        (tip[0] - tip[1]) > (brow[0] - brow[1]),
+        (round(tip[0] - tip[1], 4), round(brow[0] - brow[1], 4)),
+    )
+    check(
+        "the beard field is less saturated than the nose",
+        (jaw[0] - jaw[2]) < (tip[0] - tip[2]),
+        (round(jaw[0] - jaw[2], 4), round(tip[0] - tip[2], 4)),
+    )
+    check(
+        "no beard leaves the jaw alone",
+        human_data.skin_tones(coords, frame, beard=0.0)[
+            next(i for i in range(len(coords))
+                 if frame.chin + 0.01 < coords[i][2] < nz - 0.050 and abs(coords[i][0]) < 0.05
+                 and coords[i][1] < ny + 0.06)
+        ] != tones[
+            next(i for i in range(len(coords))
+                 if frame.chin + 0.01 < coords[i][2] < nz - 0.050 and abs(coords[i][0]) < 0.05
+                 and coords[i][1] < ny + 0.06)
+        ],
+    )
+
+    material = human.apply_skin(obj)
+    check("skin material was built", material is not None and material.use_nodes)
+    check(
+        "skin colour attribute exists",
+        human.SKIN_ATTRIBUTE in obj.data.color_attributes,
+    )
+    check(
+        "skin reads the attribute rather than a texture",
+        any(n.type == "ATTRIBUTE" for n in material.node_tree.nodes)
+        and not any(n.type.startswith("TEX_IMAGE") for n in material.node_tree.nodes),
+    )
+    check(
+        "skin still has no UV layer to have needed",
+        len(obj.data.uv_layers) == 0,
+        len(obj.data.uv_layers),
+    )
+    check(
+        "applying skin twice does not stack materials",
+        (human.apply_skin(obj) and len(obj.data.materials) == 1),
+        len(obj.data.materials),
+    )
+
     print("describe")
     report = human.describe(obj)
     check("describe reports canonical", report["canonicalTopology"] is True)

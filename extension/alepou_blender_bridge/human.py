@@ -936,3 +936,107 @@ def bind_proxy(
         "hostTriangles": len(triangles),
         "maxBindDistance": worst,
     }
+
+
+# --- Skin --------------------------------------------------------------------
+
+SKIN_ATTRIBUTE = "AlepouSkinTone"
+SKIN_MATERIAL = "AlepouSkin"
+
+
+def apply_skin(
+    obj: Any,
+    *,
+    beard: float = 0.55,
+    subsurface: float = 0.22,
+    pores: float = 0.10,
+    palette: dict | None = None,
+    name: str = SKIN_MATERIAL,
+) -> Any:
+    """Paint anatomical skin tone onto the mesh and build a shader for it.
+
+    Two halves, deliberately split. The colour is per-vertex and comes from
+    anatomy, so it is data on the fixed topology and follows every morph for
+    free. The micro detail - specular breakup and pores - is procedural, since
+    it has no business being tied to vertices at this density.
+
+    No texture is involved. There is none to licence and nowhere to put one:
+    load_human ignores the UVs in base.obj, so there is no UV layer to map to.
+    """
+    obj = _mesh_object(obj)
+    verify_topology(obj, stage="skin")
+
+    tones = human_data.skin_tones(morphed_coordinates(obj), palette=palette, beard=beard)
+
+    layer = obj.data.color_attributes.get(SKIN_ATTRIBUTE)
+    if layer is None:
+        layer = obj.data.color_attributes.new(
+            name=SKIN_ATTRIBUTE, type="FLOAT_COLOR", domain="POINT")
+    flat = []
+    for r, g, b in tones:
+        flat.extend((r, g, b, 1.0))
+    layer.data.foreach_set("color", flat)
+    obj.data.update()
+
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    tree = material.node_tree
+    tree.nodes.clear()
+
+    coordinates = tree.nodes.new("ShaderNodeTexCoord")
+    coordinates.location = (-1100, 0)
+
+    tone = tree.nodes.new("ShaderNodeAttribute")
+    tone.attribute_name = SKIN_ATTRIBUTE
+    tone.location = (-1100, 320)
+
+    # Specular breakup. Uniform roughness is most of what makes a render read
+    # as plastic; skin is never evenly rough.
+    grain = tree.nodes.new("ShaderNodeTexNoise")
+    grain.inputs["Scale"].default_value = 90.0
+    grain.inputs["Detail"].default_value = 6.0
+    grain.location = (-820, -180)
+
+    rough = tree.nodes.new("ShaderNodeMapRange")
+    rough.inputs["To Min"].default_value = 0.42
+    rough.inputs["To Max"].default_value = 0.66
+    rough.location = (-600, -180)
+
+    # Pores, at a scale where individual bumps are below a pixel and only their
+    # aggregate shows.
+    pore = tree.nodes.new("ShaderNodeTexNoise")
+    pore.inputs["Scale"].default_value = 900.0
+    pore.inputs["Detail"].default_value = 2.0
+    pore.inputs["Roughness"].default_value = 0.8
+    pore.location = (-820, -460)
+
+    bump = tree.nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = pores
+    bump.inputs["Distance"].default_value = 0.0006
+    bump.location = (-600, -460)
+
+    principled = tree.nodes.new("ShaderNodeBsdfPrincipled")
+    principled.location = (-300, 0)
+    principled.inputs["Subsurface Weight"].default_value = subsurface
+    principled.inputs["Subsurface Radius"].default_value = (0.36, 0.14, 0.08)
+    principled.inputs["Subsurface Scale"].default_value = 0.012
+    if "Specular IOR Level" in principled.inputs:
+        principled.inputs["Specular IOR Level"].default_value = 0.42
+
+    output = tree.nodes.new("ShaderNodeOutputMaterial")
+    output.location = (0, 0)
+
+    tree.links.new(coordinates.outputs["Object"], grain.inputs["Vector"])
+    tree.links.new(coordinates.outputs["Object"], pore.inputs["Vector"])
+    tree.links.new(grain.outputs["Fac"], rough.inputs["Value"])
+    tree.links.new(pore.outputs["Fac"], bump.inputs["Height"])
+    tree.links.new(tone.outputs["Color"], principled.inputs["Base Color"])
+    tree.links.new(rough.outputs["Result"], principled.inputs["Roughness"])
+    tree.links.new(bump.outputs["Normal"], principled.inputs["Normal"])
+    tree.links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+
+    if material.name not in [slot.name for slot in obj.data.materials if slot]:
+        obj.data.materials.append(material)
+    return material
