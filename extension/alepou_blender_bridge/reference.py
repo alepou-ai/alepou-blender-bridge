@@ -395,3 +395,91 @@ def align_camera_to_pair(
             "than subject."
         ),
     }
+
+
+# --- Verifying landmarks ------------------------------------------------------
+#
+# A solver that converges on the wrong target is indistinguishable from one that
+# converges on the right one, unless somebody looks. These draw the assumption
+# back onto the photograph so a bad landmark is visible before it propagates.
+
+
+def _draw_marks(
+    pixels: np.ndarray,
+    points: Iterable[tuple[float, float]],
+    colour: tuple[float, float, float],
+    *,
+    radius: int = 14,
+    thickness: int = 2,
+) -> None:
+    """Crosshair each normalised point, in place. (0,0) is the top-left."""
+    height, width = pixels.shape[0], pixels.shape[1]
+    for u, v in points:
+        cx = int(round(u * (width - 1)))
+        cy = int(round(v * (height - 1)))
+        if not (0 <= cx < width and 0 <= cy < height):
+            continue
+        for offset in range(-radius, radius + 1):
+            for spread in range(-thickness, thickness + 1):
+                x, y = cx + offset, cy + spread
+                if 0 <= x < width and 0 <= y < height:
+                    pixels[y, x, :3] = colour
+                x, y = cx + spread, cy + offset
+                if 0 <= x < width and 0 <= y < height:
+                    pixels[y, x, :3] = colour
+        # Leave the exact point readable rather than buried under the crosshair.
+        gap = max(1, radius // 4)
+        pixels[max(0, cy - gap):cy + gap + 1, max(0, cx - gap):cx + gap + 1, :3] = 1.0 - np.array(colour)
+
+
+def annotate(
+    image_path: str | Path,
+    out_path: str | Path,
+    *,
+    grid: int = 20,
+    points: Iterable[tuple[float, float]] | None = None,
+    compare: Iterable[tuple[float, float]] | None = None,
+) -> Path:
+    """Overlay a labelled grid and landmark marks on a photograph.
+
+    grid     number of divisions; every fifth line is drawn brighter so a
+             coordinate can be read off without counting from the edge
+    points   assumed landmarks, drawn in green
+    compare  the same landmarks as currently projected from the mesh, drawn in
+             magenta, so the two can be seen disagreeing
+
+    Reading a coordinate against labelled gridlines is far more accurate than
+    judging a fraction of an image, which is how the t-938 targets were wrong.
+    """
+    pixels = image_pixels(load_image(image_path)).copy()
+    height, width = pixels.shape[0], pixels.shape[1]
+
+    if grid > 0:
+        for index in range(1, grid):
+            strong = index % 5 == 0
+            value = 1.0 if strong else 0.45
+            span = 2 if strong else 1
+            x = int(round(index / grid * (width - 1)))
+            y = int(round(index / grid * (height - 1)))
+            pixels[:, max(0, x - span + 1):x + 1, 0] = value
+            pixels[:, max(0, x - span + 1):x + 1, 1] = value * 0.85
+            pixels[:, max(0, x - span + 1):x + 1, 2] = 0.0
+            pixels[max(0, y - span + 1):y + 1, :, 0] = value
+            pixels[max(0, y - span + 1):y + 1, :, 1] = value * 0.85
+            pixels[max(0, y - span + 1):y + 1, :, 2] = 0.0
+
+    if points:
+        _draw_marks(pixels, points, (0.0, 1.0, 0.2))
+    if compare:
+        _draw_marks(pixels, compare, (1.0, 0.0, 0.9))
+
+    return write_image(pixels, out_path, name="AlepouAnnotated")
+
+
+def grid_reading_hint(grid: int = 20) -> str:
+    """How to convert a gridline count into a normalised coordinate."""
+    return (
+        "Grid has {n} divisions, so each cell is {step:.3f} of the image and every "
+        "fifth line is brighter. A point k cells from the left is k/{n} across; k "
+        "cells from the top is k/{n} down.".format(n=grid, step=1.0 / grid)
+    )

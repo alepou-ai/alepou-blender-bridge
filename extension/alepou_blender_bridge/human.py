@@ -619,6 +619,7 @@ def eye_centres(obj: Any) -> tuple[Any, Any]:
             total += point
         return total / len(points)
 
-    # A character faces -Y, so its own left eye is at +X and appears on the
-    # viewer's left at -X. Return in viewer order to match image coordinates.
+    # The camera looks along +Y with +Z up, so world +X falls on the right of
+    # the image. Returned in viewer order - image-left first - to match the
+    # normalised image coordinates the reference module works in.
     return (centre(left), centre(right))

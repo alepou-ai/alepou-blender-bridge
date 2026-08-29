@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import bpy
+import numpy as np
 from mathutils import Vector
 
 REPO = Path(__file__).resolve().parents[1]
@@ -140,6 +141,22 @@ def main():
     except ReferenceError:
         coincident = True
     check("coincident targets rejected", coincident)
+
+    print("landmark annotation")
+    marks = [(0.40, 0.44), (0.60, 0.44)]
+    annotated = reference.annotate(
+        PHOTO, OUT / "annotated.png", grid=20, points=marks, compare=[landed_left, landed_right])
+    check("annotation writes an image", annotated.is_file() and annotated.stat().st_size > 1000)
+    annotated_pixels = reference.image_pixels(reference.load_image(annotated))
+    check("annotation keeps the photo resolution",
+          annotated_pixels.shape[:2] == (height, width), annotated_pixels.shape[:2])
+
+    original = reference.image_pixels(reference.load_image(PHOTO))
+    changed = float(np.abs(annotated_pixels[..., :3] - original[..., :3]).mean())
+    check("annotation actually draws something", changed > 1e-4, changed)
+
+    hint = reference.grid_reading_hint(20)
+    check("grid hint explains how to read a coordinate", "20" in hint and "cells" in hint)
 
     print("guards")
     rejected = False
