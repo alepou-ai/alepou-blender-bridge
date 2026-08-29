@@ -272,7 +272,7 @@ def add_morphs(obj: Any, root: str | Path) -> list[str]:
     return added
 
 
-def morphed_coordinates(obj: Any) -> list[tuple[float, float, float]]:
+def morphed_coordinates(obj: Any, indices: Iterable[int] | None = None) -> list[tuple[float, float, float]]:
     """World-space vertex positions with morphs applied and modifiers ignored.
 
     Deliberately not the depsgraph-evaluated mesh. Modifiers may add or remove
@@ -286,22 +286,27 @@ def morphed_coordinates(obj: Any) -> list[tuple[float, float, float]]:
     matrix = obj.matrix_world
     keys = mesh.shape_keys
 
+    # Resolving only the vertices asked for matters enormously during fitting,
+    # where this is called once per morph per landmark set. Computing all 19158
+    # positions to read 17 of them made a Jacobian build take minutes.
+    wanted = list(range(len(mesh.vertices))) if indices is None else list(indices)
+
     if keys is None or not keys.use_relative:
-        return [tuple(matrix @ v.co) for v in mesh.vertices]
+        return [tuple(matrix @ mesh.vertices[i].co) for i in wanted]
 
     blocks = keys.key_blocks
-    reference = blocks[0]
-    positions = [reference.data[i].co.copy() for i in range(len(mesh.vertices))]
+    basis = blocks[0]
+    positions = [basis.data[i].co.copy() for i in wanted]
 
     for block in blocks[1:]:
         weight = block.value
         if abs(weight) < 1e-9:
             continue
-        relative = block.relative_key or reference
-        for index in range(len(positions)):
+        relative = block.relative_key or basis
+        for slot, index in enumerate(wanted):
             delta = block.data[index].co - relative.data[index].co
             if delta.length_squared:
-                positions[index] += delta * weight
+                positions[slot] += delta * weight
 
     return [tuple(matrix @ position) for position in positions]
 
@@ -601,14 +606,15 @@ def eye_centres(obj: Any) -> tuple[Any, Any]:
     if group is None:
         raise HumanDataError("Object has no alepou_eyes group; load it with load_human")
 
-    matrix = obj.matrix_world
+    members = [
+        v.index for v in obj.data.vertices
+        if any(g.group == group.index for g in v.groups)
+    ]
     left: list[Any] = []
     right: list[Any] = []
-    for vertex in obj.data.vertices:
-        if not any(g.group == group.index for g in vertex.groups):
-            continue
-        position = matrix @ vertex.co
-        (left if position.x < 0 else right).append(position)
+    for position in morphed_coordinates(obj, members):
+        vector = Vector(position)
+        (left if vector.x < 0 else right).append(vector)
 
     if not left or not right:
         raise HumanDataError("Could not separate the eyes by side")
@@ -648,12 +654,19 @@ def landmarks(obj: Any, resource_dir: str | Path | None = None) -> dict[str, Any
             "{} has no landmarks; regenerate it with scripts/build_landmarks.py".format(anatomy_path)
         )
 
-    coords = morphed_coordinates(obj)
-    found: dict[str, Any] = {}
+    wanted: list[int] = []
+    names: list[str] = []
+    vertex_count = len(obj.data.vertices)
     for name, entry in defined.items():
         index = entry.get("vertex")
-        if isinstance(index, int) and 0 <= index < len(coords):
-            found[name] = Vector(coords[index])
+        if isinstance(index, int) and 0 <= index < vertex_count:
+            wanted.append(index)
+            names.append(name)
+
+    coords = morphed_coordinates(obj, wanted)
+    found: dict[str, Any] = {
+        name: Vector(position) for name, position in zip(names, coords)
+    }
 
     # The pupils are the eye proxy centres, not a base-mesh vertex.
     try:

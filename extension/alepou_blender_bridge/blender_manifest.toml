@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "alepou_blender_bridge"
-version = "0.4.8"
+version = "0.4.9"
 name = "Alepou Blender Bridge"
 tagline = "Auditable local bridge for AI-assisted Blender work"
 maintainer = "Alepou <hello@alepou.ai>"
