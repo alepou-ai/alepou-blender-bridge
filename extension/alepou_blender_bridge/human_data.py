@@ -507,3 +507,101 @@ LANDMARK_PAIRS = {
     "lowerFaceHeight": ("subnasale", "menton"),
     "faceHeight": ("nasion", "menton"),
 }
+
+
+# --- Authoring a proxy --------------------------------------------------------
+#
+# load_proxy reads a .mhclo; this writes one. Without it we can consume
+# MakeHuman's own assets but never make our own, which matters because the
+# community hair library is per-asset licensed and cannot be vendored.
+#
+# A bound proxy follows the body. Sculpting hair onto a head and leaving it as
+# a free mesh means every later morph breaks it; binding records where each
+# hair vertex sits relative to the body surface, so the same blob still fits
+# after the nose, jaw or skull changes.
+
+# MakeHuman's standard body-scale reference pairs, taken from the shipped eye
+# proxy. Offsets are divided by how far these have stretched, so a proxy grows
+# with the body instead of holding a fixed absolute distance.
+DEFAULT_SCALE_REFS = {0: (5399, 11998), 1: (791, 881), 2: (962, 5320)}
+
+
+def measure_scale_refs(
+    makehuman_coords: list[tuple[float, float, float]],
+    pairs: dict[int, tuple[int, int]] | None = None,
+) -> dict[int, tuple[int, int, float]]:
+    """Reference distances for the body a proxy is being authored against."""
+    pairs = pairs or DEFAULT_SCALE_REFS
+    refs: dict[int, tuple[int, int, float]] = {}
+    for axis, (a, b) in pairs.items():
+        for index in (a, b):
+            if not 0 <= index < EXPECTED_VERTEX_COUNT:
+                raise HumanDataError("Scale reference vertex {} is off-topology".format(index))
+        refs[axis] = (a, b, abs(makehuman_coords[a][axis] - makehuman_coords[b][axis]))
+    return refs
+
+
+AXIS_NAME = {0: "x_scale", 1: "y_scale", 2: "z_scale"}
+
+
+def write_proxy(
+    path: str | Path,
+    *,
+    obj_file: str,
+    fits: list[tuple[int, int, int, float, float, float, float, float, float]],
+    scale_refs: dict[int, tuple[int, int, float]],
+    name: str,
+    material: str = "",
+    notes: Iterable[str] = (),
+) -> Path:
+    """Write a .mhclo in the same dialect load_proxy reads."""
+    if not fits:
+        raise HumanDataError("Refusing to write a proxy with no vertex bindings")
+
+    lines = ["# Authored by the Alepou human substrate.", "#"]
+    lines += ["# {}".format(note) for note in notes]
+    lines += ["", "basemesh hm08", "name {}".format(name), "", "obj_file {}".format(obj_file)]
+    for axis in sorted(scale_refs):
+        a, b, distance = scale_refs[axis]
+        lines.append("{} {} {} {:.4f}".format(AXIS_NAME[axis], a, b, distance))
+    if material:
+        lines.append("material {}".format(material))
+    lines += ["", "verts 0"]
+    for v1, v2, v3, w1, w2, w3, ox, oy, oz in fits:
+        lines.append(
+            "{} {} {} {:.5f} {:.5f} {:.5f} {:.5f} {:.5f} {:.5f}".format(
+                v1, v2, v3, w1, w2, w3, ox, oy, oz
+            )
+        )
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def barycentric(
+    point: tuple[float, float, float],
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+    c: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Weights of ``point`` projected onto triangle ``abc``.
+
+    Degenerate triangles fall back to the first corner rather than raising, so
+    one bad face in a base mesh cannot fail a whole bind.
+    """
+    v0 = tuple(b[i] - a[i] for i in range(3))
+    v1 = tuple(c[i] - a[i] for i in range(3))
+    v2 = tuple(point[i] - a[i] for i in range(3))
+    d00 = sum(v0[i] * v0[i] for i in range(3))
+    d01 = sum(v0[i] * v1[i] for i in range(3))
+    d11 = sum(v1[i] * v1[i] for i in range(3))
+    d20 = sum(v2[i] * v0[i] for i in range(3))
+    d21 = sum(v2[i] * v1[i] for i in range(3))
+    denominator = d00 * d11 - d01 * d01
+    if abs(denominator) < 1e-12:
+        return (1.0, 0.0, 0.0)
+    w2 = (d11 * d20 - d01 * d21) / denominator
+    w3 = (d00 * d21 - d01 * d20) / denominator
+    return (1.0 - w2 - w3, w2, w3)

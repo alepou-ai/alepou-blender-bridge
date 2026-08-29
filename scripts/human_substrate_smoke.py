@@ -304,6 +304,80 @@ def main():
         rig_guarded = True
     check("rig construction refuses a drifted mesh", rig_guarded)
 
+    print("proxy authoring")
+    # Bind a patch lifted off the scalp, then read it back from disk. The whole
+    # value of binding is that the asset survives a change to the face, so the
+    # test changes the face.
+    import tempfile
+
+    coords = human.morphed_coordinates(obj)
+    crown = max(coords[v][2] for v in range(human_data.BODY_VERTEX_RANGE[1] + 1))
+    patch = sorted(
+        v for v in range(human_data.BODY_VERTEX_RANGE[1] + 1)
+        if coords[v][2] > crown - 0.05
+    )[:60]
+    check("scalp patch found", len(patch) == 60, len(patch))
+
+    lifted = bpy.data.meshes.new("SmokePatch")
+    lifted.from_pydata(
+        [(coords[v][0], coords[v][1], coords[v][2] + 0.01) for v in patch],
+        [], [[0, 1, 2]],
+    )
+    lifted.update()
+    blob = bpy.data.objects.new("SmokePatch", lifted)
+    bpy.context.scene.collection.objects.link(blob)
+
+    out_dir = Path(tempfile.mkdtemp())
+    info = human.bind_proxy(obj, blob, out_dir, name="smoke-patch")
+    check("bind wrote a proxy", Path(info["mhclo"]).is_file())
+    check("bind wrote a mesh", Path(info["obj"]).is_file())
+    check("bind recorded every vertex", info["vertices"] == 60, info["vertices"])
+    check(
+        "bind distance matches the lift",
+        abs(info["maxBindDistance"] - 0.01) < 0.0015,
+        info["maxBindDistance"],
+    )
+    check(
+        "bind used body triangles only",
+        info["hostTriangles"] < 27000,
+        info["hostTriangles"],
+    )
+
+    definition = human_data.load_proxy(info["mhclo"])
+    check("proxy reads back", len(definition.fits) == 60, len(definition.fits))
+    check("proxy records all three scale axes", len(definition.scale_refs) == 3)
+    check(
+        "proxy binds inside the body range",
+        all(v <= human_data.BODY_VERTEX_RANGE[1] for f in definition.fits for v in f[:3]),
+    )
+
+    bpy.data.objects.remove(blob, do_unlink=True)
+    fitted = human.add_proxy(obj, info["mhclo"], name="SmokeFitted")
+    check("fitted proxy has the authored vertex count", len(fitted.data.vertices) == 60)
+    seated = [tuple(v.co) for v in fitted.data.vertices]
+    check(
+        "re-fitting reproduces the authored positions",
+        max(
+            abs(seated[i][2] - (coords[patch[i]][2] + 0.01)) for i in range(60)
+        ) < 0.001,
+    )
+
+    before = [tuple(v.co) for v in fitted.data.vertices]
+    tall = human.add_morph(obj, next(PACK.rglob("head-scale-vert-incr.target")))
+    tall.slider_min, tall.slider_max = -1.5, 1.5
+    tall.value = 1.0
+    bpy.context.view_layer.update()
+    human.refit_proxy(fitted, obj)
+    after = [tuple(v.co) for v in fitted.data.vertices]
+    check(
+        "a bound proxy follows the face",
+        max(abs(a[2] - b[2]) for a, b in zip(after, before)) > 0.005,
+    )
+    # Remove it again rather than just zeroing it: describe() below counts
+    # shape keys, and leaving this one behind makes that check fail.
+    obj.shape_key_remove(tall)
+    bpy.context.view_layer.update()
+
     print("describe")
     report = human.describe(obj)
     check("describe reports canonical", report["canonicalTopology"] is True)

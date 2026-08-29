@@ -466,28 +466,28 @@ def _makehuman_coordinates(obj: Any) -> list[tuple[float, float, float]]:
     return [human_data.blender_to_makehuman(p) for p in morphed_coordinates(obj)]
 
 
-def add_eyes(
+def add_proxy(
     obj: Any,
-    resource_dir: str | Path | None = None,
+    mhclo: str | Path,
     *,
-    variant: str = "high-poly",
-    name: str = EYE_OBJECT_NAME,
+    name: str,
     collection: Any = None,
+    hide_envelope: bool = False,
 ) -> bpy.types.Object:
-    """Fit the eye proxy to the current head and link it as its own object.
+    """Fit any .mhclo proxy to the current body and link it as its own object.
 
-    The eye envelope inside hm08 is a fitting guide, deliberately larger than
-    the eyeball it positions, so it protrudes if rendered. This builds the real
-    proxy instead and hides the envelope. Call refit_proxy() after changing
-    morphs so the eyes keep following the head.
+    Eyes, hair, a moustache and clothing are all the same thing to MakeHuman: a
+    mesh whose vertices are recorded as barycentric positions on the body
+    surface. Fitting one means evaluating those positions against the body as it
+    is now, so the proxy follows every morph. Call refit_proxy() after changing
+    morphs.
     """
     obj = _mesh_object(obj)
-    verify_topology(obj, stage="eye fitting")
+    verify_topology(obj, stage="proxy fitting")
 
-    resource_dir = Path(resource_dir or obj.get(RESOURCE_PROPERTY, "") or default_resource_dir())
-    mhclo = resource_dir / "eyes" / variant / "{}.mhclo".format(variant)
+    mhclo = Path(mhclo)
     if not mhclo.is_file():
-        raise HumanDataError("No eye proxy at {}".format(mhclo))
+        raise HumanDataError("No proxy at {}".format(mhclo))
 
     proxy = human_data.load_proxy(mhclo)
     obj_path = (mhclo.parent / proxy.obj_file).resolve()
@@ -530,17 +530,39 @@ def add_eyes(
                     layer.data[slot].uv = uvs[uv_index]
     mesh.update()
 
-    eyes = bpy.data.objects.new(name, mesh)
-    eyes[PROXY_SOURCE_PROPERTY] = str(mhclo)
-    eyes[PROXY_HOST_PROPERTY] = obj.name
-    (collection or bpy.context.scene.collection).objects.link(eyes)
-    eyes.parent = obj
+    fitted_object = bpy.data.objects.new(name, mesh)
+    fitted_object[PROXY_SOURCE_PROPERTY] = str(mhclo)
+    fitted_object[PROXY_HOST_PROPERTY] = obj.name
+    (collection or bpy.context.scene.collection).objects.link(fitted_object)
+    fitted_object.parent = obj
 
-    # The envelope has done its job; showing it too would double the eyeball.
-    # Folding it into alepou_hidden keeps a single mask rather than stacking one
-    # modifier per hidden part.
-    _hide_envelope(obj)
-    return eyes
+    if hide_envelope:
+        # The envelope has done its job; showing it too would double the
+        # eyeball. Folding it into alepou_hidden keeps a single mask rather
+        # than stacking one modifier per hidden part.
+        _hide_envelope(obj)
+    return fitted_object
+
+
+def add_eyes(
+    obj: Any,
+    resource_dir: str | Path | None = None,
+    *,
+    variant: str = "high-poly",
+    name: str = EYE_OBJECT_NAME,
+    collection: Any = None,
+) -> bpy.types.Object:
+    """Fit the eye proxy to the current head and hide the fitting envelope.
+
+    The eye envelope inside hm08 is a fitting guide, deliberately larger than
+    the eyeball it positions, so it protrudes if rendered.
+    """
+    obj = _mesh_object(obj)
+    resource_dir = Path(resource_dir or obj.get(RESOURCE_PROPERTY, "") or default_resource_dir())
+    mhclo = resource_dir / "eyes" / variant / "{}.mhclo".format(variant)
+    if not mhclo.is_file():
+        raise HumanDataError("No eye proxy at {}".format(mhclo))
+    return add_proxy(obj, mhclo, name=name, collection=collection, hide_envelope=True)
 
 
 def _hide_envelope(obj: bpy.types.Object) -> None:
@@ -789,4 +811,128 @@ def compare_to_reference(
             "not say which morph to use, and they cannot see anything the marked "
             "landmarks do not touch."
         ),
+    }
+
+
+# --- Authoring a proxy from a Blender mesh ------------------------------------
+
+
+def _write_obj(path: Path, coords, faces, uvs=None, uv_loops=None) -> Path:
+    lines = ["# Authored by the Alepou human substrate."]
+    lines += ["v {:.6f} {:.6f} {:.6f}".format(*c) for c in coords]
+    if uvs:
+        lines += ["vt {:.6f} {:.6f}".format(*uv) for uv in uvs]
+    for index, loop in enumerate(faces):
+        if uvs and uv_loops:
+            lines.append(
+                "f " + " ".join(
+                    "{}/{}".format(v + 1, uv_loops[index][slot] + 1)
+                    for slot, v in enumerate(loop)
+                )
+            )
+        else:
+            lines.append("f " + " ".join(str(v + 1) for v in loop))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def bind_proxy(
+    host: Any,
+    source: Any,
+    out_dir: str | Path,
+    *,
+    name: str,
+    material: str = "",
+    body_only: bool = True,
+) -> dict[str, Any]:
+    """Record a sculpted mesh as a proxy of the body, and write it out.
+
+    This is the authoring half of add_proxy. Hair modelled straight onto a head
+    is a free mesh: change the skull, the jaw or the nose afterwards and it no
+    longer fits. Binding records each of its vertices as barycentric weights on
+    the nearest body triangle plus an offset, so the same shape re-fits itself
+    to whatever the face becomes.
+
+    Binds against the body range by default. Hair has no business following an
+    eyeball or a tooth envelope, and the helper geometry is where the nearest
+    triangle would otherwise sometimes land.
+    """
+    from mathutils.bvhtree import BVHTree
+
+    host = _mesh_object(host)
+    source = _mesh_object(source)
+    verify_topology(host, stage="proxy binding")
+
+    positions = [Vector(p) for p in morphed_coordinates(host)]
+    body_limit = human_data.BODY_VERTEX_RANGE[1] + 1 if body_only else len(positions)
+
+    triangles: list[tuple[int, int, int]] = []
+    for polygon in host.data.polygons:
+        loop = [host.data.loops[i].vertex_index for i in polygon.loop_indices]
+        if any(v >= body_limit for v in loop):
+            continue
+        for corner in range(1, len(loop) - 1):
+            triangles.append((loop[0], loop[corner], loop[corner + 1]))
+    if not triangles:
+        raise HumanDataError("No host triangles to bind against")
+
+    tree = BVHTree.FromPolygons([tuple(p) for p in positions], triangles, all_triangles=True)
+
+    to_host = host.matrix_world.inverted() @ source.matrix_world
+    fits = []
+    worst = 0.0
+    for vertex in source.data.vertices:
+        point = to_host @ vertex.co
+        location, _normal, index, distance = tree.find_nearest(point)
+        if location is None:
+            raise HumanDataError(
+                "No host surface near {} vertex {}".format(source.name, vertex.index)
+            )
+        v1, v2, v3 = triangles[index]
+        w1, w2, w3 = human_data.barycentric(
+            tuple(location), tuple(positions[v1]), tuple(positions[v2]), tuple(positions[v3])
+        )
+        offset = human_data.blender_to_makehuman(tuple(point - location))
+        fits.append((v1, v2, v3, w1, w2, w3, offset[0], offset[1], offset[2]))
+        worst = max(worst, distance)
+
+    out_dir = Path(out_dir)
+    obj_name = "{}.obj".format(name)
+    faces, uvs, uv_loops = [], [], []
+    uv_layer = source.data.uv_layers.active
+    seen: dict[tuple[float, float], int] = {}
+    for polygon in source.data.polygons:
+        faces.append([source.data.loops[i].vertex_index for i in polygon.loop_indices])
+        if uv_layer is not None:
+            loop_uv = []
+            for slot in polygon.loop_indices:
+                uv = tuple(round(c, 6) for c in uv_layer.data[slot].uv)
+                if uv not in seen:
+                    seen[uv] = len(uvs)
+                    uvs.append(uv)
+                loop_uv.append(seen[uv])
+            uv_loops.append(loop_uv)
+    _write_obj(out_dir / obj_name, [tuple(v.co) for v in source.data.vertices], faces, uvs, uv_loops)
+
+    mhclo = human_data.write_proxy(
+        out_dir / "{}.mhclo".format(name),
+        obj_file=obj_name,
+        fits=fits,
+        scale_refs=human_data.measure_scale_refs(_makehuman_coordinates(host)),
+        name=name,
+        material=material,
+        notes=(
+            "Bound from Blender mesh {!r} against hm08.".format(source.name),
+            "Largest bind distance {:.4f} m - a large figure means the mesh".format(worst),
+            "floats well off the body and the binding will be loose.",
+        ),
+    )
+    return {
+        "mhclo": str(mhclo),
+        "obj": str(out_dir / obj_name),
+        "vertices": len(fits),
+        "faces": len(faces),
+        "hostTriangles": len(triangles),
+        "maxBindDistance": worst,
     }
