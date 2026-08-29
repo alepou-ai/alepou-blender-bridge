@@ -702,3 +702,91 @@ def measure(obj: Any, resource_dir: str | Path | None = None) -> dict[str, Any]:
         "ratiosToInterpupillary": ratios,
         "landmarksFound": sorted(points),
     }
+
+
+def compare_to_reference(
+    obj: Any,
+    marks: dict[str, Any],
+    resource_dir: str | Path | None = None,
+    *,
+    baseline: str = "interpupillary",
+) -> dict[str, Any]:
+    """Report the same named proportions on the mesh and on a marked photograph.
+
+    A tool for judgement, not a solver. It says the model is 14 percent wider
+    across the cheekbones than the reference and leaves which morph to reach for,
+    and by how much, to whoever is doing the work. Six landmarks cannot describe
+    a face, so a number here is a hint to investigate, never an instruction.
+
+    Photograph marks are normalised image coordinates, so both columns are
+    dimensionless ratios against the baseline pair. Photograph values are
+    projected 2D and mesh values are true 3D, so a pair that runs mostly in depth
+    - anything involving the nose tip or chin - will disagree for reasons that
+    are honest projection rather than shape. Those are flagged rather than
+    silently compared.
+    """
+    points = landmarks(obj, resource_dir)
+
+    def photo_distance(a: str, b: str) -> float | None:
+        if a not in marks or b not in marks:
+            return None
+        ax, ay = float(marks[a][0]), float(marks[a][1])
+        bx, by = float(marks[b][0]), float(marks[b][1])
+        return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+    def mesh_distance(a: str, b: str) -> float | None:
+        if a not in points or b not in points:
+            return None
+        return float((points[a] - points[b]).length)
+
+    pairs = human_data.LANDMARK_PAIRS
+    if baseline not in pairs:
+        raise HumanDataError("Unknown baseline pair {!r}".format(baseline))
+
+    photo_base = photo_distance(*pairs[baseline])
+    mesh_base = mesh_distance(*pairs[baseline])
+    if not photo_base or not mesh_base:
+        raise HumanDataError(
+            "The baseline pair {} is not marked on both sides; nothing can be "
+            "compared without it".format(baseline)
+        )
+
+    rows: list[dict[str, Any]] = []
+    for name, (a, b) in pairs.items():
+        if name == baseline:
+            continue
+        photo = photo_distance(a, b)
+        mesh = mesh_distance(a, b)
+        if photo is None or mesh is None:
+            continue
+        photo_ratio = photo / photo_base
+        mesh_ratio = mesh / mesh_base
+        depth = max(
+            abs(points[a].y - points[b].y) / max(1e-9, (points[a] - points[b]).length),
+            0.0,
+        )
+        rows.append({
+            "measure": name,
+            "reference": round(photo_ratio, 4),
+            "model": round(mesh_ratio, 4),
+            "modelOverReference": round(mesh_ratio / photo_ratio, 4) if photo_ratio else None,
+            "percentDifference": round(100.0 * (mesh_ratio / photo_ratio - 1.0), 1)
+            if photo_ratio else None,
+            "depthFraction": round(depth, 2),
+            "caution": "runs mostly in depth; a frontal photograph foreshortens it"
+            if depth > 0.5 else None,
+        })
+
+    rows.sort(key=lambda row: -abs(row.get("percentDifference") or 0.0))
+    return {
+        "baseline": baseline,
+        "baselineMarked": sorted(pairs[baseline]),
+        "rows": rows,
+        "note": (
+            "Ratios against the baseline pair, so both columns are scale free. A "
+            "positive percentDifference means the model is larger than the "
+            "reference in that proportion. These are hints for judgement: they do "
+            "not say which morph to use, and they cannot see anything the marked "
+            "landmarks do not touch."
+        ),
+    }
