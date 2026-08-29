@@ -428,3 +428,163 @@ def describe(obj: Any) -> dict[str, Any]:
         "resourceDir": obj.get(RESOURCE_PROPERTY, ""),
         "rig": obj.parent.name if obj.parent and obj.parent.type == "ARMATURE" else None,
     }
+
+
+EYE_OBJECT_NAME = "AlepouHumanEyes"
+PROXY_SOURCE_PROPERTY = "alepou_proxy_source"
+PROXY_HOST_PROPERTY = "alepou_proxy_host"
+
+
+def _read_obj(path: Path) -> tuple[list[list[int]], list[tuple[float, float]], list[list[int]]]:
+    """Faces, UVs and per-loop UV indices from a proxy obj."""
+    faces: list[list[int]] = []
+    uvs: list[tuple[float, float]] = []
+    uv_loops: list[list[int]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("vt "):
+            parts = line.split()
+            uvs.append((float(parts[1]), float(parts[2])))
+        elif line.startswith("f "):
+            chunks = line.split()[1:]
+            loop, loop_uv = [], []
+            for chunk in chunks:
+                bits = chunk.split("/")
+                loop.append(int(bits[0]) - 1)
+                loop_uv.append(int(bits[1]) - 1 if len(bits) > 1 and bits[1] else -1)
+            if len(loop) >= 3:
+                faces.append(loop)
+                uv_loops.append(loop_uv)
+    return faces, uvs, uv_loops
+
+
+def _makehuman_coordinates(obj: Any) -> list[tuple[float, float, float]]:
+    return [human_data.blender_to_makehuman(p) for p in morphed_coordinates(obj)]
+
+
+def add_eyes(
+    obj: Any,
+    resource_dir: str | Path | None = None,
+    *,
+    variant: str = "high-poly",
+    name: str = EYE_OBJECT_NAME,
+    collection: Any = None,
+) -> bpy.types.Object:
+    """Fit the eye proxy to the current head and link it as its own object.
+
+    The eye envelope inside hm08 is a fitting guide, deliberately larger than
+    the eyeball it positions, so it protrudes if rendered. This builds the real
+    proxy instead and hides the envelope. Call refit_proxy() after changing
+    morphs so the eyes keep following the head.
+    """
+    obj = _mesh_object(obj)
+    verify_topology(obj, stage="eye fitting")
+
+    resource_dir = Path(resource_dir or obj.get(RESOURCE_PROPERTY, "") or default_resource_dir())
+    mhclo = resource_dir / "eyes" / variant / "{}.mhclo".format(variant)
+    if not mhclo.is_file():
+        raise HumanDataError("No eye proxy at {}".format(mhclo))
+
+    proxy = human_data.load_proxy(mhclo)
+    obj_path = (mhclo.parent / proxy.obj_file).resolve()
+    if not obj_path.is_file():
+        raise HumanDataError("Proxy {} names a missing mesh {}".format(mhclo, obj_path))
+
+    faces, uvs, uv_loops = _read_obj(obj_path)
+    fitted = human_data.fit_proxy(proxy, _makehuman_coordinates(obj))
+    coords = [human_data.makehuman_to_blender(p) for p in fitted]
+
+    if faces and max(max(f) for f in faces) >= len(coords):
+        raise HumanDataError(
+            "Proxy mesh has {} vertices but {} defines {} bindings".format(
+                max(max(f) for f in faces) + 1, mhclo.name, len(coords)
+            )
+        )
+
+    existing = bpy.data.objects.get(name)
+    if existing is not None:
+        bpy.data.objects.remove(existing, do_unlink=True)
+
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(coords, [], faces)
+    mesh.validate(verbose=False)
+
+    # from_pydata trusts the obj winding, which is not guaranteed consistent.
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(mesh)
+    bm.free()
+
+    if uvs and any(i >= 0 for loop in uv_loops for i in loop):
+        layer = mesh.uv_layers.new(name="UVMap")
+        for polygon, loop_uv in zip(mesh.polygons, uv_loops):
+            for slot, uv_index in zip(polygon.loop_indices, loop_uv):
+                if 0 <= uv_index < len(uvs):
+                    layer.data[slot].uv = uvs[uv_index]
+    mesh.update()
+
+    eyes = bpy.data.objects.new(name, mesh)
+    eyes[PROXY_SOURCE_PROPERTY] = str(mhclo)
+    eyes[PROXY_HOST_PROPERTY] = obj.name
+    (collection or bpy.context.scene.collection).objects.link(eyes)
+    eyes.parent = obj
+
+    # The envelope has done its job; showing it too would double the eyeball.
+    # Folding it into alepou_hidden keeps a single mask rather than stacking one
+    # modifier per hidden part.
+    _hide_envelope(obj)
+    return eyes
+
+
+def _hide_envelope(obj: bpy.types.Object) -> None:
+    eye_group = obj.vertex_groups.get("alepou_eyes")
+    hidden = obj.vertex_groups.get("alepou_hidden")
+    if eye_group is None or hidden is None:
+        return
+    indices = [
+        v.index for v in obj.data.vertices if any(g.group == eye_group.index for g in v.groups)
+    ]
+    if indices:
+        hidden.add(indices, 1.0, "REPLACE")
+
+
+def refit_proxy(eyes: Any, host: Any = None) -> int:
+    """Re-fit an existing proxy object after the host mesh changed shape."""
+    eyes = _mesh_object(eyes)
+    source = eyes.get(PROXY_SOURCE_PROPERTY, "")
+    if not source:
+        raise HumanDataError("{} was not created by add_eyes".format(eyes.name))
+
+    host = host or eyes.parent or bpy.data.objects.get(eyes.get(PROXY_HOST_PROPERTY, ""))
+    if host is None:
+        raise HumanDataError("Cannot find the host mesh for {}".format(eyes.name))
+
+    proxy = human_data.load_proxy(Path(source))
+    fitted = human_data.fit_proxy(proxy, _makehuman_coordinates(host))
+    if len(fitted) != len(eyes.data.vertices):
+        raise HumanDataError(
+            "Proxy binding count {} no longer matches the {} vertices in {}".format(
+                len(fitted), len(eyes.data.vertices), eyes.name
+            )
+        )
+    for vertex, position in zip(eyes.data.vertices, fitted):
+        vertex.co = Vector(human_data.makehuman_to_blender(position))
+    eyes.data.update()
+    return len(fitted)
+
+
+def hide_group(obj: Any, group_name: str, *, name: str | None = None) -> Any:
+    """Mask one vertex group away without changing topology."""
+    obj = _mesh_object(obj)
+    if group_name not in obj.vertex_groups:
+        raise HumanDataError("Object has no vertex group {!r}".format(group_name))
+    modifier_name = name or "AlepouHide_{}".format(group_name)
+    for modifier in obj.modifiers:
+        if modifier.name == modifier_name:
+            return modifier
+    modifier = obj.modifiers.new(name=modifier_name, type="MASK")
+    modifier.vertex_group = group_name
+    modifier.invert_vertex_group = True
+    return modifier

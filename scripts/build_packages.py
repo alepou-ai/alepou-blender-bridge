@@ -12,7 +12,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "extension" / "alepou_blender_bridge"
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 
 def build_runtime_wheel(destination: Path) -> Path:

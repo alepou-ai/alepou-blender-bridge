@@ -141,6 +141,44 @@ def main():
         shifted = (jaw2.head_local - jaw.head_local).length
         check("rebuilt rig tracks the morph", shifted > 1e-5, "{:.5f} m".format(shifted))
 
+    print("eye proxy")
+    eyes = human.add_eyes(obj, PACK)
+    check("eye object created", eyes is not None and eyes.type == "MESH")
+    check("eye mesh has geometry", len(eyes.data.vertices) > 100, len(eyes.data.vertices))
+    check("eyes parented to the head", eyes.parent == obj)
+
+    def bounds(mesh_object):
+        cos = [v.co for v in mesh_object.data.vertices]
+        return (min(c.x for c in cos), max(c.x for c in cos),
+                min(c.z for c in cos), max(c.z for c in cos))
+
+    ex0, ex1, ez0, ez1 = bounds(eyes)
+    check("eyes sit up in the head", ez0 > top * 0.75, "{:.3f} vs top {:.3f}".format(ez0, top))
+    check("eyes straddle the midline", ex0 < 0 < ex1, "{:.3f}..{:.3f}".format(ex0, ex1))
+    check("eyes are a plausible width", 0.03 < (ex1 - ex0) < 0.12, "{:.3f} m".format(ex1 - ex0))
+
+    envelope_hidden = False
+    hidden_group = obj.vertex_groups["alepou_hidden"].index
+    eye_group = obj.vertex_groups["alepou_eyes"].index
+    eye_ids = {v.index for v in mesh.vertices if any(g.group == eye_group for g in v.groups)}
+    hidden_ids = {v.index for v in mesh.vertices if any(g.group == hidden_group for g in v.groups)}
+    envelope_hidden = eye_ids and eye_ids <= hidden_ids
+    check("eye envelope folded into the hidden group", bool(envelope_hidden))
+
+    # The whole point of fitting rather than loading: the eyes must follow.
+    before = [v.co.copy() for v in eyes.data.vertices]
+    widen = human.add_morph(obj, PACK / "targets" / "head" / "head-scale-horiz-incr.target")
+    widen.slider_max = 1.0
+    widen.value = 1.0
+    bpy.context.view_layer.update()
+    moved_count = human.refit_proxy(eyes, obj)
+    shifted = max((v.co - before[i]).length for i, v in enumerate(eyes.data.vertices))
+    check("refit returns every binding", moved_count == len(eyes.data.vertices), moved_count)
+    check("eyes follow a head morph", shifted > 1e-4, "{:.5f} m".format(shifted))
+    widen.value = 0.0
+    bpy.context.view_layer.update()
+    human.refit_proxy(eyes, obj)
+
     print("rig survives a modifier stack")
     # A Mask hiding helpers and a render-time Subdivision both change the
     # evaluated vertex count. Reading positions from the evaluated mesh raised
@@ -223,7 +261,7 @@ def main():
     print("describe")
     report = human.describe(obj)
     check("describe reports canonical", report["canonicalTopology"] is True)
-    check("describe counts shape keys", report["shapeKeyCount"] == 3, report["shapeKeyCount"])
+    check("describe counts shape keys", report["shapeKeyCount"] == 4, report["shapeKeyCount"])
     check("describe lists active morph", "caucasian-male-old" in report["activeShapeKeys"])
 
     print("")

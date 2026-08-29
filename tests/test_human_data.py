@@ -193,5 +193,97 @@ class VendoredPack(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+class ProxyFitting(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+
+    def write(self, name, text):
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_round_trip_between_blender_and_makehuman_space(self):
+        original = (0.31, -0.17, 0.82)
+        there = human_data.blender_to_makehuman(original)
+        back = human_data.makehuman_to_blender(there)
+        for got, want in zip(back, original):
+            self.assertAlmostEqual(got, want)
+
+    def test_parses_barycentric_bindings(self):
+        path = self.write("p.mhclo", """obj_file p.obj
+x_scale 10 20 2.0
+y_scale 30 40 4.0
+z_scale 50 60 8.0
+verts 0
+1 2 3 0.5 0.25 0.25 0.1 0.2 0.3
+""")
+        proxy = human_data.load_proxy(path)
+        self.assertEqual(proxy.obj_file, "p.obj")
+        self.assertEqual(len(proxy.fits), 1)
+        self.assertEqual(proxy.scale_refs[0], (10, 20, 2.0))
+        self.assertEqual(proxy.scale_refs[1], (30, 40, 4.0))
+        self.assertEqual(proxy.scale_refs[2], (50, 60, 8.0))
+
+    def test_parses_the_one_to_one_form(self):
+        path = self.write("p.mhclo", """obj_file p.obj
+verts 0
+14666
+14665
+""")
+        proxy = human_data.load_proxy(path)
+        self.assertEqual([f[0] for f in proxy.fits], [14666, 14665])
+        self.assertEqual(proxy.fits[0][3:6], (1.0, 0.0, 0.0))
+
+    def test_rejects_a_binding_outside_the_canonical_mesh(self):
+        path = self.write("p.mhclo", """obj_file p.obj
+verts 0
+999999
+""")
+        with self.assertRaisesRegex(HumanDataError, "outside the canonical mesh"):
+            human_data.load_proxy(path)
+
+    def test_fit_blends_the_three_base_vertices(self):
+        path = self.write("p.mhclo", """obj_file p.obj
+verts 0
+0 1 2 0.5 0.5 0.0 0 0 0
+""")
+        proxy = human_data.load_proxy(path)
+        coords = [(0.0, 0.0, 0.0), (2.0, 4.0, 6.0), (9.0, 9.0, 9.0)]
+        fitted = human_data.fit_proxy(proxy, coords)
+        for got, want in zip(fitted[0], (1.0, 2.0, 3.0)):
+            self.assertAlmostEqual(got, want)
+
+    def test_offsets_scale_with_the_body(self):
+        # The reference distance is 1.0, so doubling it doubles the offset.
+        text = """obj_file p.obj
+x_scale 0 1 1.0
+verts 0
+0 0 0 1 0 0 1.0 0 0
+"""
+        proxy = human_data.load_proxy(self.write("p.mhclo", text))
+        at_reference = human_data.fit_proxy(proxy, [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+        stretched = human_data.fit_proxy(proxy, [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)])
+        self.assertAlmostEqual(at_reference[0][0], 1.0)
+        self.assertAlmostEqual(stretched[0][0], 2.0)
+
+
+@unittest.skipUnless((PACK / "eyes").is_dir(), "eye proxy not vendored")
+class VendoredEyeProxy(unittest.TestCase):
+    def test_high_poly_proxy_loads_and_binds_into_the_eye_region(self):
+        proxy = human_data.load_proxy(PACK / "eyes" / "high-poly" / "high-poly.mhclo")
+        self.assertTrue(proxy.fits)
+        self.assertEqual(set(proxy.scale_refs), {0, 1, 2})
+        referenced = {v for fit in proxy.fits for v in fit[:3]}
+        # Every binding should land on the eye envelope, not stray across the face.
+        self.assertTrue(min(referenced) >= 14500, min(referenced))
+        self.assertTrue(max(referenced) <= 14800, max(referenced))
+
+    def test_low_poly_proxy_uses_the_one_to_one_form(self):
+        proxy = human_data.load_proxy(PACK / "eyes" / "low-poly" / "low-poly.mhclo")
+        self.assertTrue(all(f[3] == 1.0 for f in proxy.fits))
+
+
 if __name__ == "__main__":
     unittest.main()

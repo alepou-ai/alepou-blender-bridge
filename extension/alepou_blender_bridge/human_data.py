@@ -249,3 +249,144 @@ def check_signature(actual: str, expected: str) -> None:
                 actual[:16], expected[:16], TOPOLOGY_DRIFT_HELP
             )
         )
+
+
+# --- Proxy meshes (.mhclo) ---------------------------------------------------
+#
+# A proxy is a separate mesh - eyes here - pinned to the base mesh so it follows
+# every morph. Each proxy vertex is expressed as a barycentric blend of three
+# base vertices plus an offset, and the offset is scaled by how far the body has
+# stretched relative to a reference distance. Fitting therefore has to be
+# computed, not merely loaded: a statically placed eyeball stops matching the
+# socket the moment a morph is applied.
+
+
+class ProxyDefinition:
+    """Parsed .mhclo: how to place a proxy mesh on the base mesh."""
+
+    __slots__ = ("name", "obj_file", "material", "scale_refs", "fits", "path")
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.name = path.stem
+        self.obj_file = ""
+        self.material = ""
+        # axis index -> (vertexA, vertexB, referenceDistance)
+        self.scale_refs: dict[int, tuple[int, int, float]] = {}
+        # (v1, v2, v3, w1, w2, w3, ox, oy, oz)
+        self.fits: list[tuple[int, int, int, float, float, float, float, float, float]] = []
+
+
+AXIS_INDEX = {"x_scale": 0, "y_scale": 1, "z_scale": 2}
+
+
+def load_proxy(path: str | Path) -> ProxyDefinition:
+    """Parse a .mhclo proxy definition."""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise HumanDataError("Cannot read proxy {}: {}".format(path, error)) from error
+
+    proxy = ProxyDefinition(path)
+    in_verts = False
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        key = parts[0]
+
+        if key == "verts":
+            in_verts = True
+            continue
+        if not in_verts:
+            if key in AXIS_INDEX and len(parts) >= 4:
+                proxy.scale_refs[AXIS_INDEX[key]] = (int(parts[1]), int(parts[2]), float(parts[3]))
+            elif key == "obj_file" and len(parts) >= 2:
+                proxy.obj_file = parts[1]
+            elif key == "material" and len(parts) >= 2:
+                proxy.material = parts[1]
+            elif key == "name" and len(parts) >= 2:
+                proxy.name = " ".join(parts[1:])
+            continue
+
+        # Inside the vertex block. Nine columns is the barycentric form; a
+        # single column is the degenerate 1:1 form used by low-poly proxies.
+        try:
+            if len(parts) >= 9:
+                v1, v2, v3 = int(parts[0]), int(parts[1]), int(parts[2])
+                w1, w2, w3 = float(parts[3]), float(parts[4]), float(parts[5])
+                ox, oy, oz = float(parts[6]), float(parts[7]), float(parts[8])
+            elif len(parts) == 1:
+                v1 = v2 = v3 = int(parts[0])
+                w1, w2, w3 = 1.0, 0.0, 0.0
+                ox = oy = oz = 0.0
+            else:
+                raise HumanDataError(
+                    "{}:{}: expected 1 or 9 columns in the vertex block, got {}".format(
+                        path, number, len(parts)
+                    )
+                )
+        except ValueError as error:
+            raise HumanDataError("{}:{}: {}".format(path, number, error)) from error
+
+        for index in (v1, v2, v3):
+            if not 0 <= index < EXPECTED_VERTEX_COUNT:
+                raise HumanDataError(
+                    "{}:{}: proxy references base vertex {} outside the canonical mesh".format(
+                        path, number, index
+                    )
+                )
+        proxy.fits.append((v1, v2, v3, w1, w2, w3, ox, oy, oz))
+
+    if not proxy.fits:
+        raise HumanDataError("{}: proxy has no vertex bindings".format(path))
+    if not proxy.obj_file:
+        raise HumanDataError("{}: proxy names no obj_file".format(path))
+    return proxy
+
+
+def proxy_scale(
+    proxy: ProxyDefinition, makehuman_coords: list[tuple[float, float, float]]
+) -> tuple[float, float, float]:
+    """Per-axis offset scale, from how far the body has stretched.
+
+    MakeHuman divides the current distance between two reference vertices by the
+    distance recorded when the proxy was authored, so a proxy offset grows with
+    the body rather than staying a fixed absolute distance.
+    """
+    scale = [1.0, 1.0, 1.0]
+    for axis, (a, b, reference) in proxy.scale_refs.items():
+        if reference == 0:
+            continue
+        scale[axis] = abs(makehuman_coords[a][axis] - makehuman_coords[b][axis]) / reference
+    return (scale[0], scale[1], scale[2])
+
+
+def fit_proxy(
+    proxy: ProxyDefinition, makehuman_coords: list[tuple[float, float, float]]
+) -> list[tuple[float, float, float]]:
+    """Proxy vertex positions in MakeHuman space, fitted to the current body."""
+    sx, sy, sz = proxy_scale(proxy, makehuman_coords)
+    fitted: list[tuple[float, float, float]] = []
+    for v1, v2, v3, w1, w2, w3, ox, oy, oz in proxy.fits:
+        a, b, c = makehuman_coords[v1], makehuman_coords[v2], makehuman_coords[v3]
+        fitted.append((
+            a[0] * w1 + b[0] * w2 + c[0] * w3 + ox * sx,
+            a[1] * w1 + b[1] * w2 + c[1] * w3 + oy * sy,
+            a[2] * w1 + b[2] * w2 + c[2] * w3 + oz * sz,
+        ))
+    return fitted
+
+
+def blender_to_makehuman(position: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Inverse of the load-time mapping, so fitting can run in MakeHuman space."""
+    bx, by, bz = position
+    return (bx / UNIT_SCALE, bz / UNIT_SCALE, -by / UNIT_SCALE)
+
+
+def makehuman_to_blender(position: tuple[float, float, float]) -> tuple[float, float, float]:
+    """MakeHuman space back to Blender space."""
+    mx, my, mz = position
+    return (mx * UNIT_SCALE, -mz * UNIT_SCALE, my * UNIT_SCALE)
