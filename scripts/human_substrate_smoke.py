@@ -49,6 +49,33 @@ def main():
     check("canonical vertex count", len(mesh.vertices) == 19158, len(mesh.vertices))
     check("faces built", len(mesh.polygons) == 18486, len(mesh.polygons))
     check("helper group tagged", "alepou_helpers" in obj.vertex_groups)
+    for group in ("alepou_anatomy", "alepou_clothing_helpers", "alepou_joints", "alepou_hidden"):
+        check("group {} exists".format(group), group in obj.vertex_groups)
+
+    # hm08 keeps eyes, teeth, tongue and eyelashes in the helper range. Masking
+    # the whole range leaves empty eye sockets, which is what the first pilot
+    # rendered, so anatomy must be separated from clothing scaffolding.
+    def group_size(name):
+        index = obj.vertex_groups[name].index
+        return sum(1 for v in mesh.vertices if any(g.group == index for g in v.groups))
+
+    anatomy = group_size("alepou_anatomy")
+    hidden = group_size("alepou_hidden")
+    check("anatomy group holds eyes/teeth/tongue/lashes", 600 < anatomy < 900, anatomy)
+    check("hidden group holds clothing and joints", hidden > 4000, hidden)
+    def group_members(name):
+        index = obj.vertex_groups[name].index
+        return {v.index for v in mesh.vertices if any(g.group == index for g in v.groups)}
+
+    overlap = group_members("alepou_anatomy") & group_members("alepou_hidden")
+    check("anatomy and hidden sets are disjoint", not overlap, len(overlap))
+
+    mask = human.hide_non_render_geometry(obj)
+    check("hide modifier added", mask.type == "MASK")
+    d = bpy.context.evaluated_depsgraph_get()
+    visible = len(obj.evaluated_get(d).to_mesh().vertices)
+    check("render keeps body plus anatomy", 13380 < visible < 14400, visible)
+    obj.modifiers.remove(mask)
 
     # Height should be a believable human in metres, not decimetres.
     zs = [v.co.z for v in mesh.vertices]

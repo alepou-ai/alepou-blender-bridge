@@ -25,6 +25,11 @@ UNIT_SCALE = 0.1
 
 ETHNICITY_DIRS = frozenset({"african", "asian", "caucasian"})
 
+# hm08 stores real facial anatomy in the helper vertex range alongside clothing
+# helpers. These parts are anatomy and must survive into a render; everything
+# else helper-prefixed is fitting scaffolding.
+ANATOMY_HELPER_PARTS = ("eye", "teeth", "tongue", "eyelash")
+
 
 class HumanDataError(ValueError):
     """Raised when substrate data is missing, malformed, or off-topology."""

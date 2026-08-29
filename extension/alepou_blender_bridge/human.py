@@ -118,16 +118,23 @@ def load_human(
 
     coords: list[tuple[float, float, float]] = []
     faces: list[list[int]] = []
+    group_vertices: dict[str, set[int]] = {}
     scale = human_data.UNIT_SCALE
+    current_group = ""
     for line in obj_path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("v "):
             parts = line.split()
             lateral, up, depth = float(parts[1]), float(parts[2]), float(parts[3])
             coords.append((lateral * scale, -depth * scale, up * scale))
+        elif line.startswith("g "):
+            current_group = line[2:].strip()
+            group_vertices.setdefault(current_group, set())
         elif line.startswith("f "):
             loop = [int(chunk.split("/")[0]) - 1 for chunk in line.split()[1:]]
             if len(loop) >= 3:
                 faces.append(loop)
+                if current_group:
+                    group_vertices[current_group].update(loop)
 
     human_data.check_vertex_count(len(coords))
 
@@ -144,7 +151,7 @@ def load_human(
     target_collection.objects.link(obj)
 
     _ensure_basis(obj)
-    _tag_helper_group(obj)
+    _tag_vertex_groups(obj, group_vertices)
     return obj
 
 
@@ -155,11 +162,79 @@ def _ensure_basis(obj: bpy.types.Object) -> bpy.types.ShapeKey:
     return mesh.shape_keys.key_blocks[0]
 
 
-def _tag_helper_group(obj: bpy.types.Object) -> None:
-    """Put helper vertices in their own group so they can be hidden and stripped."""
+def _tag_vertex_groups(obj: bpy.types.Object, group_vertices: dict[str, set[int]]) -> None:
+    """Sort the mesh into semantic groups so renders hide only what should hide.
+
+    hm08 keeps eyes, eyelashes, teeth and the tongue inside the helper vertex
+    range alongside clothing helpers and joint cubes. Masking the whole helper
+    range therefore removes them and leaves empty sockets, which is what the
+    first pilot rendered. They live in the same mesh, so they already follow
+    every morph and are already rig-anchored.
+
+    Note that the eye and eyelash groups are fitting *envelopes*, deliberately
+    slightly larger than the anatomy they guide. Rendered directly they poke
+    through the eyelids. They are correct for placement, driving and export
+    masking; a render-quality eyeball still needs the separate eye proxy.
+    """
     low, high = human_data.HELPER_VERTEX_RANGE
-    group = obj.vertex_groups.get("alepou_helpers") or obj.vertex_groups.new(name="alepou_helpers")
-    group.add(list(range(low, high + 1)), 1.0, "REPLACE")
+
+    def add(name: str, indices: Iterable[int]) -> int:
+        indices = sorted(set(indices))
+        group = obj.vertex_groups.get(name) or obj.vertex_groups.new(name=name)
+        if indices:
+            group.add(list(indices), 1.0, "REPLACE")
+        return len(indices)
+
+    helper_range = set(range(low, high + 1))
+    anatomy: set[int] = set()
+    clothing: set[int] = set()
+    joints: set[int] = set()
+    for name, vertices in group_vertices.items():
+        if name.startswith("joint-"):
+            joints |= vertices
+        elif any(part in name for part in human_data.ANATOMY_HELPER_PARTS):
+            anatomy |= vertices
+        elif name.startswith("helper-"):
+            clothing |= vertices
+
+    # A group name may only claim helper-range vertices; the body is never hidden.
+    anatomy &= helper_range
+    clothing &= helper_range
+    joints &= helper_range
+
+    # Per-part groups so a project can give the eyes their own material, drive
+    # them, or export them separately without rediscovering index ranges.
+    parts: dict[str, set[int]] = {}
+    for name, vertices in group_vertices.items():
+        for part in human_data.ANATOMY_HELPER_PARTS:
+            if part in name and not name.startswith("joint-"):
+                key = "alepou_{}s".format(part) if not part.endswith("s") else "alepou_" + part
+                parts.setdefault(key, set()).update(vertices & helper_range)
+    for key, vertices in parts.items():
+        add(key, vertices)
+
+    add("alepou_helpers", helper_range)
+    add("alepou_anatomy", anatomy)
+    add("alepou_clothing_helpers", clothing)
+    add("alepou_joints", joints)
+    add("alepou_hidden", (clothing | joints) - anatomy)
+
+
+def hide_non_render_geometry(obj: Any, *, name: str = "AlepouHideHelpers") -> Any:
+    """Mask clothing helpers and joint cubes, keeping body and facial anatomy.
+
+    A Mask modifier, never applied, so vertex identity survives untouched.
+    """
+    obj = _mesh_object(obj)
+    if "alepou_hidden" not in obj.vertex_groups:
+        raise HumanDataError("Object was not loaded by load_human; alepou_hidden is missing")
+    for modifier in obj.modifiers:
+        if modifier.name == name:
+            return modifier
+    modifier = obj.modifiers.new(name=name, type="MASK")
+    modifier.vertex_group = "alepou_hidden"
+    modifier.invert_vertex_group = True
+    return modifier
 
 
 def add_morph(obj: Any, target_path: str | Path, *, name: str | None = None) -> bpy.types.ShapeKey:
