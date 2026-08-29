@@ -142,6 +142,56 @@ def main():
         coincident = True
     check("coincident targets rejected", coincident)
 
+    print("camera pose solve")
+    # Ground truth: project landmarks from a known camera, disturb the camera,
+    # then check the solver puts it back. If it cannot recover its own
+    # projection it will certainly not fit a photograph.
+    points = human.landmarks(obj, PACK)
+    chosen = [n for n in ("pupil_left", "pupil_right", "pronasale", "menton",
+                          "cheilion_left", "cheilion_right", "zygion_left", "zygion_right")
+              if n in points]
+    check("enough landmarks for a solve", len(chosen) >= 6, len(chosen))
+
+    truth_location = camera.location.copy()
+    truth_rotation = camera.rotation_euler.copy()
+    truth_lens = camera.data.lens
+    targets = [reference.project(scene, camera, points[n]) for n in chosen]
+    correspondences = list(zip([points[n] for n in chosen], targets))
+
+    camera.location = truth_location + Vector((0.06, 0.09, -0.04))
+    camera.rotation_euler[0] += 0.05
+    camera.rotation_euler[2] -= 0.04
+    camera.data.lens = truth_lens * 0.7
+    bpy.context.view_layer.update()
+    disturbed = reference._residuals(scene, camera, correspondences, 1.0)
+    disturbed_rms = float((disturbed @ disturbed / len(correspondences)) ** 0.5)
+    check("disturbing the camera raises the error", disturbed_rms > 0.02, disturbed_rms)
+
+    solved = reference.solve_camera_pose(scene, camera, correspondences, focal_range=(10.0, 300.0))
+    check("solver recovers its own projection", solved["rmsError"] < 1e-3, solved["rmsError"])
+    check("solver recovers the focal length",
+          abs(camera.data.lens - truth_lens) < 1.0,
+          "{:.2f} vs {:.2f}".format(camera.data.lens, truth_lens))
+    check("solver recovers the position",
+          (camera.location - truth_location).length < 0.01,
+          (camera.location - truth_location).length)
+    check("solve reports what a low error does not prove", "marked correctly" in solved["note"])
+
+    bounded = reference.solve_camera_pose(
+        scene, camera, correspondences, focal_range=(truth_lens * 2.0, truth_lens * 3.0))
+    check("a solve pinned to its bound says so", bounded["focalAtBound"] is True)
+
+    too_few = False
+    try:
+        reference.solve_camera_pose(scene, camera, correspondences[:2])
+    except ReferenceError:
+        too_few = True
+    check("too few correspondences rejected", too_few)
+
+    camera.location, camera.rotation_euler = truth_location, truth_rotation
+    camera.data.lens = truth_lens
+    bpy.context.view_layer.update()
+
     print("landmark annotation")
     marks = [(0.40, 0.44), (0.60, 0.44)]
     annotated = reference.annotate(

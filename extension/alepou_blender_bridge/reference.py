@@ -483,3 +483,146 @@ def grid_reading_hint(grid: int = 20) -> str:
         "fifth line is brighter. A point k cells from the left is k/{n} across; k "
         "cells from the top is k/{n} down.".format(n=grid, step=1.0 / grid)
     )
+
+
+# --- Solving the camera -------------------------------------------------------
+
+
+def _camera_parameters(camera: Any, solve_focal: bool) -> list[float]:
+    values = list(camera.location) + list(camera.rotation_euler)
+    if solve_focal:
+        values.append(camera.data.lens)
+    return values
+
+
+def _apply_parameters(
+    camera: Any,
+    values: Iterable[float],
+    solve_focal: bool,
+    focal_range: tuple[float, float] = (4.0, 400.0),
+) -> None:
+    values = list(values)
+    camera.location = values[0:3]
+    camera.rotation_euler = values[3:6]
+    if solve_focal:
+        camera.data.lens = min(max(values[6], focal_range[0]), focal_range[1])
+    bpy.context.view_layer.update()
+
+
+def _residuals(
+    scene: Any, camera: Any, correspondences: list[tuple[Any, tuple[float, float]]], aspect: float
+) -> np.ndarray:
+    out = np.empty(len(correspondences) * 2, dtype=np.float64)
+    for index, (world_position, target) in enumerate(correspondences):
+        u, v = project(scene, camera, world_position)
+        out[index * 2] = (u - target[0]) * aspect
+        out[index * 2 + 1] = v - target[1]
+    return out
+
+
+def solve_camera_pose(
+    scene: Any,
+    camera: Any,
+    correspondences: list[tuple[Any, tuple[float, float]]],
+    *,
+    solve_focal: bool = True,
+    focal_range: tuple[float, float] = (18.0, 300.0),
+    iterations: int = 60,
+) -> dict[str, Any]:
+    """Fit camera position, orientation and focal length to marked landmarks.
+
+    Levenberg-Marquardt over the camera parameters, with the Jacobian taken by
+    finite difference through Blender's own projection. Going through Blender
+    rather than reimplementing the projection means sensor fit, shift and aspect
+    are handled by the same code that will render the result.
+
+    This is what turns perspective into a modelled property: a photograph taken
+    at arm's length solves to a near camera with a short focal length, and the
+    enlarged nose is explained rather than absorbed into the anatomy.
+
+    Bound the focal length. When the subject's shape does not match the mesh, an
+    unbounded solve will happily invent an extreme wide angle to drive the
+    residual down, trading a plausible camera for a lower number. A solve that
+    parks against its bound is reporting a shape problem, not a camera one, and
+    focalAtBound says so.
+    """
+    minimum = 6 if not solve_focal else 4
+    if len(correspondences) < minimum:
+        raise ReferenceError(
+            "Need at least {} correspondences to solve the camera, got {}".format(
+                minimum, len(correspondences)
+            )
+        )
+
+    render = scene.render
+    aspect = (render.resolution_x * render.pixel_aspect_x) / max(
+        1e-9, render.resolution_y * render.pixel_aspect_y
+    )
+
+    parameters = np.array(_camera_parameters(camera, solve_focal), dtype=np.float64)
+    steps = np.array([0.004] * 3 + [0.004] * 3 + ([0.5] if solve_focal else []), dtype=np.float64)
+
+    _apply_parameters(camera, parameters, solve_focal, focal_range)
+    residual = _residuals(scene, camera, correspondences, aspect)
+    cost = float(residual @ residual)
+    damping = 1e-3
+    history = [cost]
+
+    for _ in range(max(1, iterations)):
+        jacobian = np.empty((residual.size, parameters.size), dtype=np.float64)
+        for column in range(parameters.size):
+            probe = parameters.copy()
+            probe[column] += steps[column]
+            _apply_parameters(camera, probe, solve_focal, focal_range)
+            jacobian[:, column] = (
+                _residuals(scene, camera, correspondences, aspect) - residual
+            ) / steps[column]
+        _apply_parameters(camera, parameters, solve_focal, focal_range)
+
+        normal = jacobian.T @ jacobian
+        gradient = jacobian.T @ residual
+        improved = False
+        for _attempt in range(8):
+            try:
+                delta = np.linalg.solve(
+                    normal + damping * np.diag(np.diag(normal) + 1e-12), -gradient
+                )
+            except np.linalg.LinAlgError:
+                damping *= 10.0
+                continue
+            candidate = parameters + delta
+            _apply_parameters(camera, candidate, solve_focal, focal_range)
+            trial = _residuals(scene, camera, correspondences, aspect)
+            trial_cost = float(trial @ trial)
+            if trial_cost < cost:
+                parameters, residual, cost = candidate, trial, trial_cost
+                damping = max(1e-9, damping * 0.4)
+                improved = True
+                break
+            damping *= 10.0
+        _apply_parameters(camera, parameters, solve_focal, focal_range)
+        history.append(cost)
+        if not improved or (len(history) > 2 and abs(history[-2] - cost) < 1e-12):
+            break
+
+    per_point = np.sqrt(residual.reshape(-1, 2) ** 2 @ np.ones(2))
+    return {
+        "rmsError": float(np.sqrt(cost / max(1, len(correspondences)))),
+        "worstPointError": float(per_point.max()),
+        "perPointError": [round(float(v), 5) for v in per_point],
+        "iterations": len(history) - 1,
+        "focalLength_mm": round(float(camera.data.lens), 2),
+        "cameraDistance": None,
+        "solvedFocal": bool(solve_focal),
+        "focalRange_mm": [focal_range[0], focal_range[1]],
+        "focalAtBound": bool(
+            solve_focal
+            and (camera.data.lens <= focal_range[0] + 1e-6
+                 or camera.data.lens >= focal_range[1] - 1e-6)
+        ),
+        "note": (
+            "Errors are normalised image units, so 0.01 is one percent of the "
+            "image. A low error only means the camera explains the marked points; "
+            "it says nothing about whether the points were marked correctly."
+        ),
+    }
