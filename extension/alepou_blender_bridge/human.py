@@ -1104,7 +1104,20 @@ def build_material(definition: Any, *, name: str | None = None) -> Any:
         node = tree.nodes.new("ShaderNodeTexImage")
         node.image = image
         node.location = (-700, 0)
-        tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
+        # MakeHuman multiplies the diffuse texture by diffuseColor rather than
+        # replacing it. Ignoring that renders a near-black hair texture, whose
+        # material declares 0.04 grey, at full texture brightness.
+        if any(abs(c - 1.0) > 1e-3 for c in diffuse):
+            tint = tree.nodes.new("ShaderNodeMix")
+            tint.data_type = "RGBA"
+            tint.blend_type = "MULTIPLY"
+            tint.location = (-500, 120)
+            tint.inputs["Factor"].default_value = 1.0
+            tree.links.new(node.outputs["Color"], tint.inputs[6])
+            tint.inputs[7].default_value = (*diffuse, 1.0)
+            tree.links.new(tint.outputs[2], principled.inputs["Base Color"])
+        else:
+            tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
         if definition.flags.get("transparent") or opacity < 1.0:
             tree.links.new(node.outputs["Alpha"], principled.inputs["Alpha"])
     elif texture_path:

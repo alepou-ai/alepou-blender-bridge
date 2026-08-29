@@ -815,7 +815,9 @@ def load_material(path: str | Path) -> MaterialDefinition:
     material = MaterialDefinition(path)
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
+        # The vendored eye material comments with '#'; every community .mhmat
+        # seen so far comments with '//'. Both are in the wild, so skip both.
+        if not line or line.startswith("#") or line.startswith("//"):
             continue
         parts = line.split()
         key, values = parts[0], parts[1:]
