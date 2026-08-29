@@ -12,7 +12,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "extension" / "alepou_blender_bridge"
-VERSION = "0.4.9"
+
+
+def _manifest_version() -> str:
+    """One source of truth. This was a third hard-coded copy of the version and
+    it had drifted three releases behind, like the one in protocol.py."""
+    import re
+
+    text = (SOURCE / "blender_manifest.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if not match:
+        raise SystemExit("blender_manifest.toml declares no version")
+    return match.group(1)
+
+
+VERSION = _manifest_version()
 
 
 def build_runtime_wheel(destination: Path) -> Path:

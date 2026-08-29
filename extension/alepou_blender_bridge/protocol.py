@@ -12,7 +12,27 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 SCHEMA_VERSION = 1
-BRIDGE_VERSION = "0.4.9"
+
+
+def _packaged_version(fallback: str = "0.6.0") -> str:
+    """The version the manifest declares, which is the one actually installed.
+
+    This was a hard-coded constant and it drifted: the manifest went 0.4.9,
+    0.5.0, 0.5.1, 0.6.0 while this stayed at 0.4.9, so a running bridge
+    announced a version three releases behind itself in every health file and
+    every ping. The manifest ships inside the extension directory, so there is
+    no reason to keep a second copy of the same fact.
+    """
+    manifest = Path(__file__).with_name("blender_manifest.toml")
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return fallback
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else fallback
+
+
+BRIDGE_VERSION = _packaged_version()
 DEFAULT_MAX_JSON_BYTES = 4 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
