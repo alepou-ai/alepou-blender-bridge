@@ -1,98 +1,194 @@
 # Alepou Blender Bridge
 
-Alepou Blender Bridge gives AI coding sessions a durable, inspectable way to
-observe and work through Blender. It exports compact exact state, accepts
-atomic local requests, captures deterministic diagnostic renders, records
-script evidence, and keeps the normal Blender integration on the main thread.
+**An auditable local bridge that lets AI coding sessions observe, author, inspect, and repair real Blender scenes.**
 
-This repository contains two independently usable surfaces. The Blender
-extension is the complete normal-user installation; the CLI and wheel are
-optional developer surfaces.
+Alepou Blender Bridge keeps Blender authoritative. It does not turn `.blend` files into text, replace native Blender techniques with a reduced modelling language, or run `bpy` from a background socket thread. The extension exports bounded project state, accepts atomic local requests, executes Blender work on the main thread, and preserves exact results plus visual evidence for review.
 
-- `extension/alepou_blender_bridge/` — the Blender extension/add-on;
-- `src/alepou_blender/` — a thin CLI for the local file contract.
+The bridge can be used directly through its file contract or optional CLI. [Alepou](https://alepou.ai) is the recommended control plane when the work also needs durable plans, task/commit history, cross-session memory, phone oversight, or autonomous launch of a project-bound Blender session.
 
-The bridge does not require Alepou to use. Alepou is the recommended control
-plane for project continuity, task tracking, and AI sessions.
+> **Alpha:** use version control and preserve source `.blend` files. Local Trusted Development permits arbitrary recorded Blender Python with the Blender process's user privileges. A failed script may already have changed the scene; a recovery snapshot is not an automatic rollback.
 
-The repository also contains an **experimental, disabled-by-default Spatial
-vertical slice**. Spatial is a semantic authoring representation layered on the
-working bridge; it does not replace raw Blender Python and is not yet a claim
-of superior modelling quality.
+## What It Enables
 
-> **Alpha:** use a version-controlled project or disposable `.blend` while
-> evaluating script execution. Arbitrary Blender Python is powerful and a
-> failed script may already have mutated the scene.
+- Bind a specific Blender process to a canonical project, with fresh health and instance identity.
+- Read compact scene and selection maps without dumping a large scene into model context.
+- Ask targeted questions about objects, evaluated bounds, topology, materials, distances, alignment, and conservative intersections.
+- Capture deterministic clay, studio, silhouette, wireframe, viewport, or scene-lit evidence fitted to the requested subject.
+- Run recorded inline `bpy` scripts under Blender-local authority, with source, hash, output, timings, fingerprints, and recovery evidence retained.
+- Inspect the result, enumerate defects, repair them, and save the accepted native Blender artifact.
+- Keep multiple Blender windows isolated by `instanceId`; a processor never claims a request addressed to another instance.
+
+## Production Evidence: 90s_Office
+
+These are retained outputs from the ongoing **90s_Office** VR production, not generated marketing mockups. Each period product was researched, constructed as its own native Blender source asset, checked with exact queries and multiple rendered views, repaired, and accepted before Unity assembly.
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/images/90s-office-casio-calculator.png" alt="Casio HR-170LB printing calculator authored through Alepou Blender Bridge" /></td>
+    <td width="33%"><img src="docs/images/90s-office-swingline-stapler.png" alt="Swingline 747 stapler authored through Alepou Blender Bridge" /></td>
+    <td width="33%"><img src="docs/images/90s-office-sony-monitor.png" alt="Sony CPD-200ES CRT monitor authored through Alepou Blender Bridge" /></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Casio HR-170LB</strong><br/>Printing calculator</td>
+    <td align="center"><strong>Swingline 747</strong><br/>Desk stapler</td>
+    <td align="center"><strong>Sony CPD-200ES</strong><br/>CRT monitor</td>
+  </tr>
+</table>
+
+The larger office is still in progress. These images evidence individually accepted source assets and the bridge's research/build/inspect/repair loop; they are not a claim that the final room is complete.
+
+## The Closed Loop
+
+1. **Bind and verify.** Read `bridge-health.json` first. Continue only when the processor is active, fresh, and bound to the intended canonical project and Blender instance.
+2. **Map before drilling down.** Use `scene-summary.json` and `selection.json` for the compact map, then submit bounded queries for the exact objects and properties that matter.
+3. **Author natively.** Use recorded inline `script.execute` requests, choosing the Blender technique that fits the form: mesh editing, curves, subdivision, booleans, bevels, modifiers, sculpting, Geometry Nodes, or other native tools.
+4. **Inspect exact state.** Check authored and evaluated bounds, mesh statistics, attachment distances, alignment, and likely intersections.
+5. **Inspect visual evidence.** Capture several useful, well-lit, closely framed views that expose silhouette, surfaces, attachments, and hidden relationships.
+6. **Repair all observed defects.** A successful script is only a transport result. Acceptance comes after the geometry and evidence agree.
+7. **Save the accepted source.** Preserve the `.blend`, scripts, terminal results, captures, and project task/commit record needed for downstream assembly.
 
 ## Architecture
 
-The user binds the open Blender process to an explicit project root. The
-extension writes and watches `<project>/plan/blender/` using atomic local file
-operations. A persistent `bpy.app.timers` callback claims work; all `bpy`
-access stays on Blender's main thread. No Python socket worker is used.
+```mermaid
+flowchart LR
+    AI[AI session or developer CLI] -->|query JSON| Q[plan/blender/queries/pending]
+    AI -->|trusted command JSON| C[plan/blender/commands/pending]
+    Q --> B[Blender extension<br/>main-thread timer]
+    C --> B
+    B -->|bounded state| S[scene summary, selection, state]
+    B -->|terminal result| R[results / applied / failed / rejected / interrupted]
+    B -->|review evidence| E[captures, runs, recovery]
+    S --> AI
+    R --> AI
+    E --> AI
+```
 
-Each running Blender processor has a stable process-lifetime `instanceId` and
-owns an isolated workspace at
-`<project>/plan/blender/instances/<instanceId>/`. Instance-targeted requests
-must include `target.instanceId`; a processor never applies a request addressed
-to another Blender window. One live instance also holds a short heartbeat lease
-for the original `<project>/plan/blender/` queues and state files, preserving
-single-instance CLI compatibility without allowing multiple processors to race
-over them. Opening another `.blend` keeps the instance identity and changes the
-executor generation.
+The extension watches `<project>/plan/blender/` with atomic local file operations. A persistent `bpy.app.timers` callback claims work, and all `bpy` access stays on Blender's main thread. There is no persistent Python socket server or worker thread inside Blender.
 
-Always-on state is deliberately bounded:
+Each processor has a stable process-lifetime `instanceId` and an isolated workspace under `plan/blender/instances/<instanceId>/`. A single fresh instance may also hold the short heartbeat lease for the compatibility queues at `plan/blender/`. Opening another `.blend` keeps the instance identity but changes the executor generation.
 
-- `bridge-health.json` — fresh processor heartbeat and binding identity;
-- `capabilities.json` — protocol and supported operations;
-- `scene-summary.json`, `selection.json`, and `diagnostics.json`;
-- `state/objects-summary.json` and collection/change summaries;
-- `commands/` — durable mutation lifecycle and terminal results;
-- `queries/` — bounded targeted queries;
-- `captures/`, `recovery/`, and `runs/` — inspectable evidence.
+```text
+plan/blender/
+  bridge-health.json
+  status.md
+  capabilities.json
+  scene-summary.json
+  selection.json
+  diagnostics.json
+  state/
+  queries/
+    pending/
+    results/
+  commands/
+    pending/
+    processing/
+    applied/
+    failed/
+    rejected/
+    interrupted/
+  captures/
+  recovery/
+  runs/
+```
 
-## Install for development
+`capabilities.json` is authoritative for the installed bridge. Public documentation explains the model; live project files describe the exact available operations and current state.
 
-Build both install formats with:
+## Installation
+
+The current Blender extension manifest is **0.7.1** and supports Blender **4.1+**. A standalone public release has not yet been published, so build an immutable install zip from this checkout rather than installing an unpinned URL.
+
+Build the Blender 4.2+ extension and Blender 4.1 legacy add-on packages:
 
 ```powershell
 python scripts\build_packages.py `
   --blender 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe'
 ```
 
-For Blender 4.2+, open **Edit → Preferences → Get Extensions → Install from
-Disk** and choose `dist/alepou_blender_bridge-0.3.2.zip`. The extension package
-includes the Spatial Python runtime used inside Blender; normal Alepou users do
-not install a Python wheel or run `pip`. For Blender 4.1, use the Add-ons install
-control and choose the `-legacy.zip` package. That legacy package retains the
-raw bridge but does not include Blender's extension-managed Spatial wheel. Enable
-**Alepou Blender Bridge**. During source development you can instead add
-`extension/` to Blender's Python path and register the package directly.
+- Blender 4.2+: **Edit > Preferences > Get Extensions > Install from Disk**, then choose `dist/alepou_blender_bridge-0.7.1.zip`.
+- Blender 4.1: use the Add-ons install control and choose `dist/alepou_blender_bridge-0.7.1-legacy.zip`.
+- Enable **Alepou Blender Bridge**.
 
-With Alepou running, open the **Alepou** tab in Blender's 3D View sidebar
-(`N`), click **Refresh Alepou Projects**, select the exact project, and click
-**Bind and Initialize**. The list uses a loopback-only, per-run authenticated
-agent capability and shows the canonical root so projects with the same name
-remain unambiguous. Binding publishes health and scene state immediately but
-always returns authority to Observation Only. The manual project-folder field
-remains available when Alepou is offline.
+The extension zip is the normal installation. Users do not install a Python wheel or run `pip`; the wheel and CLI are optional developer surfaces.
 
-In the add-on preferences you can also:
+### Bind a project
 
-1. enter a project root manually for offline use;
-2. enable processing;
-3. leave the default observation mode for reads and captures, or explicitly
-   choose Local Trusted Development for recorded scripts and scene mutations;
-4. optionally bind trusted work to an Alepou session id.
+With Alepou running:
 
-Trusted Development remains active until revoked, the project binding changes,
-or Blender closes. **STOP Bridge** remains available in Blender's 3D View
-sidebar and blocks new claims immediately.
+1. Open the **Alepou** tab in Blender's 3D View sidebar (`N`).
+2. Click **Refresh Alepou Projects**.
+3. Select the exact project; the canonical root is shown so duplicate names remain unambiguous.
+4. Click **Bind and Initialize**.
+5. Verify that `<project>/plan/blender/bridge-health.json` is fresh and reports the intended project, `.blend`, `instanceId`, and `processorActive: true`.
 
-## Optional developer CLI
+Project discovery uses Alepou's loopback-only, per-run authenticated local capability. A manual project-root field remains available for direct/offline use. Binding always returns Blender to **Observation Only**.
 
-The wheel and editable install remain useful for library development, external
-automation, and CI. They are not part of the normal Blender installation flow:
+## Authority and Stop Controls
+
+**Observation Only** is the default. It permits fresh state export, bounded queries, and diagnostic capture.
+
+Recorded `script.execute` and other scene mutations require Blender-local **Local Trusted Development**. The user enables it in Blender and may bind it to one Alepou session id. It remains active until revoked, the project binding changes, or Blender closes. Alepou can report and use this authority; it cannot create or widen it.
+
+**STOP Bridge** is always available in Blender's Alepou sidebar. It rejects queued requests and blocks new claims. Python already executing on Blender's main thread cannot be forcibly terminated safely; stop/revoke controls apply at request boundaries.
+
+Projects that explicitly opt into Alepou's audited autonomous authoring can ask Alepou's authenticated local integration to start a visible project-bound Blender process. The durable launch job and fresh instance record provide the real project, grant, and instance identities. Starting Blender does not grant Local Trusted Development and does not bypass Blender's stop controls.
+
+## Requests and Results
+
+Mutation request example:
+
+```json
+{
+  "schemaVersion": 1,
+  "commandId": "cmd-build-chair-001",
+  "target": {"instanceId": "blender-7f4c91a2b038"},
+  "sessionId": "optional-owning-alepou-session",
+  "title": "Build chair prototype",
+  "intent": "Create the first inspectable blockout",
+  "actions": [
+    {
+      "action": "script.execute",
+      "source": "import bpy\nbpy.ops.mesh.primitive_cube_add()"
+    },
+    {"action": "state.refresh"}
+  ]
+}
+```
+
+Observation requests go to `queries/pending/`; trusted mutations go to `commands/pending/`. A processor atomically moves a command into `processing/` and terminates it in `applied/`, `failed/`, `rejected/`, or `interrupted/`. Executor restart moves an abandoned claim to `interrupted/` rather than replaying it. Never reuse a terminal `commandId`.
+
+Representative observations:
+
+- `bridge.ping`, `state.refresh`, `scene.summary`, `scene.list_objects`
+- `object.inspect`, `object.bounds`, `mesh.stats`, `material.inspect`
+- `scene.distance`, `scene.alignment`, `scene.intersections`
+- `capture.diagnostic`, `capture.viewport`
+
+Representative trusted mutations:
+
+- `script.execute`
+- `scene.save_copy`, `scene.restore_snapshot`
+- `object.select`, `camera.ensure_standard`
+
+Diagnostic capture supports named or caller-supplied directions, orthographic or perspective projection, and clay, studio, silhouette, wireframe, or scene-lit modes. Framing fits the requested subject's actual bounds, including small real-scale products. Agents can instead author project cameras and lighting when that communicates the work better.
+
+## Recovery Semantics
+
+Before each recorded script, the bridge saves a recovery snapshot and records the exact source/hash, stdout/stderr, elapsed time, and before/after scene fingerprints.
+
+Those records make failures inspectable; they do not make arbitrary Python transactional. If a script throws after changing the scene, the result is `failed` and the mutation may remain. Do not claim rollback unless a separate `scene.restore_snapshot` request reaches an applied terminal result and the refreshed scene verifies the restore.
+
+## Honest Limitations
+
+- This is powerful local authoring, not a sandbox around Blender Python.
+- Visual quality is not guaranteed by request success. Agents must inspect and repair their work.
+- The bridge does not understand every Blender editor control as a typed command. Recorded `bpy` remains the productive authoring surface.
+- Observation is live only while `bridge-health.json` is fresh; leftover scene files are not a connected Editor.
+- Multi-instance routing prevents queue races, but callers still have to target the intended Blender instance.
+- Autonomous launch is an Alepou integration feature, not a grant of Blender-local mutation authority.
+
+## Optional Developer CLI
+
+The thin CLI and Python wheel are useful for protocol development, external automation, and CI. They never import `bpy`:
 
 ```powershell
 python -m pip install -e .
@@ -101,222 +197,21 @@ alepou-blender --project D:\path\to\project query scene.summary
 alepou-blender --project D:\path\to\project script .\build_scene.py --session my-session
 ```
 
-Every command prints one JSON envelope. `submit` accepts an existing request
-file for advanced use. The CLI never imports `bpy`.
+Every command prints one JSON envelope. `submit` accepts an existing request file for advanced use.
 
-## Experimental Spatial authoring
+## Experimental Spatial Research
 
-Spatial Python and Spatial YAML/JSON normalize to the same backend-neutral IR.
-The core records stable entity identity, frames, axes, anchors, assemblies,
-linear/grid/radial repetition, simple relations, resolved state, and `why`
-provenance. The Blender backend turns a resolved compile plan into one recorded
-`script.execute` request; Spatial Core never imports `bpy`.
-
-The project mode is explicit and enforced by both the CLI and Blender service:
-
-```powershell
-alepou-blender --project D:\path\to\project spatial-mode
-alepou-blender --project D:\path\to\project spatial-mode opt_in
-alepou-blender --project D:\path\to\project spatial-mode required
-alepou-blender --project D:\path\to\project spatial-mode off
-```
-
-- `off` is the default: raw `bpy` works and Spatial authoring is rejected;
-- `opt_in` allows either representation when the request selects it;
-- `required` rejects raw `script.execute` authoring for truthful benchmarks;
-- no mode silently falls back from Spatial to raw `bpy`.
-
-Blender 4.2+ extension packages accept bundled `spatial.execute`,
-`spatial.inspect`, and `spatial.why` actions directly. A normal Alepou session
-can therefore submit Spatial Python or JSON through the existing file contract
-without installing anything into the user's system Python. The extension
-records the authored source, normalized IR, resolved state, compile plan, and
-generated `bpy` under the command run. YAML is available when a compatible
-PyYAML wheel is present; Python and JSON are the self-contained package formats.
-
-```json
-{
-  "schemaVersion": 1,
-  "commandId": "spatial-analyser-001",
-  "representation": {
-    "kind": "spatial",
-    "version": "0.1",
-    "fallbackAllowed": false
-  },
-  "actions": [
-    {
-      "action": "spatial.execute",
-      "sourceFormat": "python",
-      "compileMode": "update",
-      "source": "import spatial\nscene = spatial.Scene('demo', units='mm')\nscene.box('housing', size=(400, 300, 200))"
-    },
-    {"action": "state.refresh"}
-  ]
-}
-```
-
-A compact Python authoring example:
-
-```python
-import spatial
-
-scene = spatial.Scene("analyser", units="mm")
-frame = scene.frame("analyser_frame", origin=(0, 0, 430))
-beam = scene.axis("beam", frame=frame, direction=(1, 0, 0))
-
-q1 = scene.radial_array(
-    "Q1_rods",
-    count=4,
-    axis=beam,
-    radius=55,
-    start_angle=45,
-    element=spatial.CylinderSpec(radius=18, length=300, axis="X"),
-    frame=frame,
-    center=(-290, 0, 0),
-)
-cell = scene.cylinder("collision_cell", radius=40, length=220, axis="X", frame=frame)
-cell.after(q1, gap=60, axis="X", id="cell_after_q1")
-cell.center_on(beam, id="cell_on_beam")
-
-resolved = scene.resolve()
-print(resolved.inspect("collision_cell"))
-print(resolved.why("collision_cell.center.x"))
-scene.write_yaml("analyser.spatial.yaml")
-```
-
-Circular quality and surface shading are explicit authoring choices rather than
-hidden backend constants. Applicable primitives accept segment/ring counts, and
-all geometry accepts `flat`, `smooth`, or deterministic smooth-by-angle shading:
-
-```python
-base = scene.cylinder(
-    "base",
-    radius=140,
-    length=36,
-    segments=96,
-    shading=spatial.Shading.smooth_by_angle(30),
-)
-low_poly_knob = scene.cylinder(
-    "knob",
-    radius=12,
-    length=18,
-    segments=8,
-    shading="flat",
-)
-```
-
-The values are retained in normalized IR and object provenance, so a later edit
-can distinguish an intentional eight-sided control from a mechanical cylinder
-that must retain a round silhouette.
-
-Reusable assets can also declare their semantic root, pivot, ground plane, and
-orientation. Spatial uses the named anchor for horizontal centring and the root
-assembly bounds for grounding; it does not guess the pivot from the overall
-visual bounding box. That matters for articulated assets such as a desk lamp,
-whose shade can extend far beyond its base:
-
-```python
-base.anchor(
-    "asset_origin",
-    position=(0, 0, -18),
-    direction=(1, 0, 0),
-    up=(0, 0, 1),
-)
-lamp = scene.assembly("lamp", children=(base, lower_arm, upper_arm, shade))
-scene.asset(
-    root=lamp,
-    origin="base.asset_origin",
-    center_axes=("X", "Y"),
-    ground_axis="Z",
-    up="Z",
-    forward="X",
-)
-```
-
-The resolved asset root becomes the Blender origin, the declared base anchor is
-centred on X/Y, and the asset rests on Z=0. The normalized constitution is
-included in resolved state, compile plans, Blender scene provenance, and Bridge
-scene summaries.
-
-Compile a serialized source through the live bridge only after opting in:
-
-```powershell
-alepou-blender --project D:\path\to\project spatial analyser.spatial.yaml --compile-mode dry_run
-alepou-blender --project D:\path\to\project spatial-inspect analyser.spatial.yaml collision_cell
-alepou-blender --project D:\path\to\project spatial-why analyser.spatial.yaml collision_cell.center.x
-alepou-blender --project D:\path\to\project spatial analyser.spatial.yaml --compile-mode update --session my-session
-```
-
-Compilation writes the normalized source, resolved state, compile plan, and
-generated Blender Python into the command's bridge run directory. Managed
-objects carry `spatial.*` provenance. Updates preserve semantic object identity,
-leave unrelated raw Blender objects untouched, and reject conflicting external
-changes unless an inspected caller explicitly uses `--force`.
-
-The initial relation solver is intentionally small: `after`, `before`,
-`centered_on`, and `aligned_with` operate deterministically on supported shared,
-axis-aligned frames. Unsupported orientations and constraint cycles fail with
-repairable errors. This is not a general CAD solver, organic sculpting system,
-or custom language.
-
-## Request envelope
-
-```json
-{
-  "schemaVersion": 1,
-  "commandId": "cmd-build-chair-001",
-  "target": {"instanceId": "blender-7f4c91a2b038"},
-  "sessionId": "optional-owning-session",
-  "title": "Build chair prototype",
-  "intent": "Create the first inspectable blockout",
-  "actions": [
-    {
-      "action": "script.execute",
-      "source": "import bpy\nbpy.ops.mesh.primitive_cube_add()"
-    },
-    {
-      "action": "state.refresh"
-    }
-  ]
-}
-```
-
-Observation requests may go to `queries/pending/`; mutation requests go to
-`commands/pending/`. The extension atomically claims command files into
-`commands/processing/` and terminates them in `applied`, `failed`, `rejected`,
-or `interrupted`. A completed command id is never silently replayed.
-
-## Supported vertical-slice operations
-
-Observation:
-
-- `bridge.ping`, `state.refresh`, `scene.summary`, `scene.list_objects`;
-- `object.inspect`, `object.bounds`, `mesh.stats`, `material.inspect`;
-- `scene.distance`, `scene.alignment`, `scene.intersections`;
-- `capture.diagnostic`, `capture.viewport`.
-
-Trusted mutation:
-
-- `script.execute`, `scene.save_copy`, `scene.restore_snapshot`;
-- `object.select`, `camera.ensure_standard`.
-
-Diagnostic renders offer named or caller-supplied directions, orthographic or
-perspective projection, and clay, studio-lit material, silhouette, wireframe,
-or scene-lit beauty modes. Framing is fitted to the requested target's actual
-bounds with no metre-scale floor, so small real-scale products remain readable.
-Agents may instead author their own cameras and lighting when that better exposes
-the subject. Authored and dependency-graph-evaluated bounds are reported
-separately.
+The repository retains a disabled-by-default Spatial authoring experiment under `src/spatial*` plus its benchmark material. Spatial normalizes a small semantic representation to one recorded `script.execute` request. It does not replace raw Blender Python, is not a general CAD or sculpting system, and is not part of the product-quality claim made by this README. The default project mode is `off`; no mode silently falls back between Spatial and raw `bpy`.
 
 ## Validation
 
-Pure protocol and CLI tests run with:
+Run the pure protocol and CLI suite:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The real Blender smoke script accepts a temporary project root:
+Run the real Blender smoke test against a temporary project:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
@@ -324,32 +219,14 @@ The real Blender smoke script accepts a temporary project root:
   --project D:\temp\alepou-blender-smoke
 ```
 
-It exercises health, atomic claims, exact state, trusted script execution,
-object inspection, diagnostic rendering, and save-copy evidence.
+The smoke covers health, atomic claims, exact state, trusted script execution, object inspection, diagnostic rendering, and save-copy evidence. Additional scripts in `scripts/` cover multi-instance routing, diagnostic capture, project binding, reference overlays, and the experimental Spatial and human-substrate work.
 
-The real Spatial compiler smoke is separate:
+## Repository Layout
 
-```powershell
-& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
-  --background --factory-startup --python scripts\spatial_blender_smoke.py -- `
-  --output D:\temp\spatial-smoke.blend
-```
+- `extension/alepou_blender_bridge/` — Blender extension/add-on and authoritative 0.7.1 manifest
+- `src/alepou_blender/` — optional developer CLI for the local file contract
+- `scripts/` — packaging and real-Blender validation
+- `tests/` — pure protocol, CLI, discovery, and research tests
+- `docs/images/` — retained production evidence used by this README
 
-It builds a semantic triple-quadrupole assembly, edits the chamber length,
-re-solves both declared gaps, preserves stable managed Blender object identity,
-and proves that an unrelated raw Blender object survives the update.
-
-Targeted real-Blender regressions also cover hierarchy/material update
-preservation, ordinary Bridge Spatial-ID export, geometry quality/shading, and
-reusable-asset origin constitution:
-
-```powershell
-& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
-  --background --factory-startup --python scripts\spatial_update_regression.py
-& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
-  --background --factory-startup --python scripts\spatial_state_identity_regression.py
-& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
-  --background --factory-startup --python scripts\spatial_geometry_quality_regression.py
-& 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe' `
-  --background --factory-startup --python scripts\spatial_asset_constitution_regression.py
-```
+Apache-2.0 licensed. See [LICENSE](LICENSE).
