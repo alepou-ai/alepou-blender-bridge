@@ -1096,6 +1096,15 @@ def build_material(definition: Any, *, name: str | None = None) -> Any:
     principled.inputs["Roughness"].default_value = max(0.06, 1.0 - shininess * 0.9)
     opacity = definition.numbers.get("opacity", 1.0)
 
+    # specularColor is the specular STRENGTH, and hair materials set it very
+    # low - 0.05 on mhair02, 0.0 on junglebookhair - precisely because hair is
+    # not a mirror. Leaving Blender's 0.5 default while shininess drove
+    # roughness down to 0.06 gave every hair a blown white patch on the crown.
+    specular = definition.colours.get("specularColor")
+    if specular is not None and "Specular IOR Level" in principled.inputs:
+        principled.inputs["Specular IOR Level"].default_value = max(
+            0.0, min(1.0, sum(specular) / 3.0))
+
     texture_path = definition.texture_path("diffuseTexture")
     if texture_path and texture_path.is_file():
         image = bpy.data.images.get(texture_path.name)
