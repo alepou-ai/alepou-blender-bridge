@@ -95,7 +95,21 @@ plan/blender/
 
 ## Installation
 
-The current Blender extension manifest is **0.7.1** and supports Blender **4.1+**. A standalone public release has not yet been published, so build an immutable install zip from this checkout rather than installing an unpinned URL.
+The current Blender extension manifest is **0.7.1** and supports Blender **4.1+**.
+
+### Install through Alepou
+
+The recommended route is the project's **Install / Update Bridge** button in Alepou. Alepou ships both packages, detects the selected Blender version, and asks Blender to install the correct one. Close running Blender windows before installing. Blender 4.2+ uses the extension package; Blender 4.1 uses the legacy add-on package.
+
+### Install manually
+
+Download the immutable packages from the [v0.7.1 GitHub release](https://github.com/alepou-ai/alepou-blender-bridge/releases/tag/v0.7.1):
+
+- Blender 4.2+: choose `alepou_blender_bridge-0.7.1.zip` from **Edit > Preferences > Get Extensions > Install from Disk**.
+- Blender 4.1: choose `alepou_blender_bridge-0.7.1-legacy.zip` from the Add-ons install control.
+- Enable **Alepou Blender Bridge**.
+
+To reproduce those packages from source:
 
 Build the Blender 4.2+ extension and Blender 4.1 legacy add-on packages:
 
@@ -103,10 +117,6 @@ Build the Blender 4.2+ extension and Blender 4.1 legacy add-on packages:
 python scripts\build_packages.py `
   --blender 'C:\Program Files\Blender Foundation\Blender 4.3\blender.exe'
 ```
-
-- Blender 4.2+: **Edit > Preferences > Get Extensions > Install from Disk**, then choose `dist/alepou_blender_bridge-0.7.1.zip`.
-- Blender 4.1: use the Add-ons install control and choose `dist/alepou_blender_bridge-0.7.1-legacy.zip`.
-- Enable **Alepou Blender Bridge**.
 
 The extension zip is the normal installation. Users do not install a Python wheel or run `pip`; the wheel and CLI are optional developer surfaces.
 
@@ -201,7 +211,7 @@ Every command prints one JSON envelope. `submit` accepts an existing request fil
 
 ## Experimental Spatial Research
 
-The repository retains a disabled-by-default Spatial authoring experiment under `src/spatial*` plus its benchmark material. Spatial normalizes a small semantic representation to one recorded `script.execute` request. It does not replace raw Blender Python, is not a general CAD or sculpting system, and is not part of the product-quality claim made by this README. The default project mode is `off`; no mode silently falls back between Spatial and raw `bpy`.
+The repository retains a disabled-by-default Spatial authoring experiment under `src/spatial*`. Spatial normalizes a small semantic representation to one recorded `script.execute` request. It does not replace raw Blender Python, is not a general CAD or sculpting system, and is not part of the product-quality claim made by this README. The default project mode is `off`; no mode silently falls back between Spatial and raw `bpy`.
 
 ## Validation
 

@@ -101,7 +101,7 @@ def main() -> int:
         )
         with zipfile.ZipFile(legacy_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for source in sorted(staged.rglob("*")):
-                if source.is_file() and source.name != "blender_manifest.toml" and "wheels" not in source.relative_to(staged).parts:
+                if source.is_file() and source.name != "blender_manifest.toml":
                     archive.write(source, Path("alepou_blender_bridge") / source.relative_to(staged))
 
     for package in (extension_zip, legacy_zip):

@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty
+
+
+# Blender 4.2+ installs manifest-declared wheels for extensions. Blender 4.1's
+# legacy add-on loader does not, so make the wheel copied into the legacy ZIP
+# importable before the service imports the bundled Spatial runtime.
+if __package__ == "alepou_blender_bridge":
+    for _wheel in sorted((Path(__file__).resolve().parent / "wheels").glob("*.whl")):
+        _wheel_path = str(_wheel)
+        if _wheel_path not in sys.path:
+            sys.path.insert(0, _wheel_path)
 
 from . import alepou_discovery, protocol, service, spatial_policy
 
 bl_info = {
     "name": "Alepou Blender Bridge",
     "author": "Alepou",
-    "version": (0, 3, 2),
+    "version": (0, 7, 1),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Alepou",
     "description": "Auditable local bridge for Alepou-managed AI sessions",
